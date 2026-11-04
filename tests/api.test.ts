@@ -4,6 +4,7 @@ import { freshDb, call, submit, q, closePool } from "./helpers";
 import { envelope, weekRange, listingCheck, annualWorkbook, seasonalWorkbook } from "./fixtures/synthetic";
 import { runSheetSync, intakeToSubmissions } from "../server/sheetSync";
 import { buildSnapshot } from "../server/routes/reports";
+import { READER_LIMITS, _setFetchForTests } from "../server/sheetsReader";
 
 beforeAll(async () => {
   process.env.EXCLUDED_BRANDS = "Excluded Demo Brand";
@@ -176,6 +177,26 @@ describe("promotion spreadsheet sync", () => {
     const src = (await q("select last_error, last_success_at is not null as had_success from sheet_sources where id = $1", [annual]))[0];
     expect(src.last_error).toBeTruthy();
     expect(src.had_success).toBe(true);
+  });
+  it("a timed-out Apps Script read through the default reader changes nothing and records the failure", async () => {
+    const before = await q("select id, title, to_char(start_date,'YYYY-MM-DD') s from promotions order by id");
+    const lastOk = (await q("select last_success_at from sheet_sources where id = $1", [annual]))[0].last_success_at;
+    process.env.SHEET_READER_URL = "https://script.google.com/macros/s/FAKEdeploymentidabcdefghijklmnop0123/exec";
+    process.env.SHEET_READER_KEY = "k".repeat(40);
+    const saved = READER_LIMITS.timeoutMs; READER_LIMITS.timeoutMs = 50;
+    _setFetchForTests(((_u: any, init: any) => new Promise((_res, rej) => init.signal.addEventListener("abort", () => rej(new Error("aborted"))))) as any);
+    try {
+      const r = await runSheetSync(annual, "schedule", "t");
+      expect(r).toMatchObject({ outcome: "failed" });
+      expect((r as any).error).toMatch(/did not finish within/);
+    } finally {
+      READER_LIMITS.timeoutMs = saved; _setFetchForTests(null);
+      delete process.env.SHEET_READER_URL; delete process.env.SHEET_READER_KEY;
+    }
+    expect(await q("select id, title, to_char(start_date,'YYYY-MM-DD') s from promotions order by id")).toEqual(before);
+    const src = (await q("select last_error, last_success_at from sheet_sources where id = $1", [annual]))[0];
+    expect(src.last_error).toMatch(/did not finish within/);
+    expect(src.last_success_at).toEqual(lastOk);
   });
   it("flags conflicting vendor dates and keeps vendor cost reductions separate from customer discounts", async () => {
     seasonal = (await q("insert into sheet_sources (business_id, year, role, label, file_id, file_kind, created_by) values ('sb', 2026, 'seasonal_program', 'S', 'TESTseasonFILEid00000000001', 'google_sheet', 't') returning id"))[0].id;

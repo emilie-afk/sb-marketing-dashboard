@@ -3,7 +3,7 @@
 import type pg from "pg";
 import { one, query, tx } from "./db";
 import { HttpError } from "./http";
-import { SheetReader, driveReader } from "./sheetsReader";
+import { SheetReader, sheetReader } from "./sheetsReader";
 import { parseAnnualCalendar, parseSeasonalProgram, Sheet, Cell, SOURCE_FIELDS, ParsedWorkbook } from "../shared/calendarParse";
 import { planSync, ExistingPromotion, SourceRole } from "../shared/promotionSync";
 import { checkSubmission } from "../shared/submission";
@@ -12,7 +12,7 @@ import { logServerError, redact } from "./redact";
 
 type SheetSource = { id: string; business_id: string; year: number | null; role: SourceRole; file_id: string; file_kind: "google_sheet" | "xlsx"; label: string };
 
-export async function runSheetSync(sourceId: string, trigger: "schedule" | "manual", actor: string, reader: SheetReader = driveReader) {
+export async function runSheetSync(sourceId: string, trigger: "schedule" | "manual", actor: string, reader: SheetReader = sheetReader) {
   const src = await one<SheetSource>("select id, business_id, year, role, file_id, file_kind, label from sheet_sources where id = $1 and active", [sourceId]);
   if (!src) throw new HttpError(404, "not_found", "Spreadsheet source not found or inactive.");
   await query("update sheet_sources set last_attempt_at = now() where id = $1", [src.id]);
@@ -45,8 +45,17 @@ async function fail(runId: string, srcId: string, msg: string) {
   await query("update sheet_sources set last_error = $2 where id = $1", [srcId, redact(msg, 500)]);
 }
 
+// Test hook: runs inside the transaction after existing promotions are read (used to force concurrent syncs to overlap).
+let afterReadHook: ((src: SheetSource) => Promise<void>) | null = null;
+export function _setAfterCalendarReadForTests(h: typeof afterReadHook) { afterReadHook = h; }
+
 async function applyCalendar(src: SheetSource, parsed: ParsedWorkbook, runId: string, actor: string) {
   return tx(async (c) => {
+    // Annual and seasonal spreadsheets of the same business can describe the same promotions, and their background
+    // jobs may run at the same time. One transaction-scoped lock per business serializes calendar application, taken
+    // before anything is read, so each sync plans against the other's committed promotions and ownership links.
+    // Transaction-scoped (released at commit or rollback), so it is safe behind a transaction-mode connection pooler.
+    await c.query("select pg_advisory_xact_lock(hashtext('mkd.calendar'), hashtext($1))", [src.business_id]);
     // Occasions: source-owned fields only; the "selected for use" link is the dashboard's.
     for (const o of parsed.occasions) {
       await c.query(
@@ -60,6 +69,7 @@ async function applyCalendar(src: SheetSource, parsed: ParsedWorkbook, runId: st
       "select identity_key as \"identityKey\", promotion_id as \"promotionId\", last_tab as \"lastTab\", last_seen_at as \"lastSeenAt\" from promotion_source_links where sheet_source_id = $1",
       [src.id])).rows;
     const promos = await candidatePromotions(c, src);
+    if (afterReadHook) await afterReadHook(src);
     const plan = planSync({ role: src.role, parsed, links, promotions: promos });
 
     for (const cr of plan.create) {

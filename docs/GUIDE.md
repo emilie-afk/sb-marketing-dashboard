@@ -13,9 +13,11 @@ Netlify Function api.ts ──► server/app.ts ── routes ── PostgreSQL 
    │  Bearer automation token
 Scheduled tasks ── POST /api/submissions ──► same validation and import engine
 
-Netlify scheduled function sheet-sync.ts (every 15 min)
-   └─► registered Google spreadsheets (read-only Drive API) ──► promotions / intake submissions
-   └─► Plant Revenue Breakdown Worker (viewer key, read-only) ──► product submissions
+Netlify scheduled function sheet-sync.ts (every 15 min, queues due jobs only)
+   └─► sync_jobs (one active job per spreadsheet) ──► signed start ──► background function sheet-sync-background.ts (up to 15 min)
+          └─► registered Google spreadsheets (read-only: Apps Script reader or Drive API) ──► promotions / intake submissions
+          └─► Plant Revenue Breakdown Worker (viewer key, read-only) ──► product submissions
+"Refresh from spreadsheet" (editor) ──► the same job flow
 ```
 
 | Folder | Purpose |
@@ -62,8 +64,14 @@ Spreadsheet sync is one-way. Precedence when two sheets describe the same promot
 
 ## 4. Promotion spreadsheet sync
 
+- Reading access (choose one; server settings only):
+  1. **Apps Script reader (preferred).** Create a script project from a team Google account that can already view the spreadsheets, paste `scripts/apps-script/sheet-reader.gs` and `appsscript.json`, and set the script properties `READER_KEY` (a random value of at least 32 characters) and `ALLOWED_FILE_IDS` (the registered file ids, comma separated). Run `checkAccess` once to approve read-only Drive access, then deploy as a web app (execute as me, anyone can call). Set `SHEET_READER_URL` to the web app address and `SHEET_READER_KEY` to the same key. It runs as that account, so it is not affected by the 7-day refresh-token limit that applies to Google sign-in apps in Testing mode. It still depends on that account keeping its authorization of the script and its access to the files, and on Apps Script quotas; if any of these lapse, the sync shows the failure in Settings and keeps the last successful data. The dashboard waits at most 60 seconds per read, refuses responses over the size limit while downloading, and follows only plain redirects to Google's script result host (never resending the key). Add new file ids to `ALLOWED_FILE_IDS` when registering a new spreadsheet.
+  2. **Drive API refresh token**: `GOOGLE_SYNC_REFRESH_TOKEN` with the scope `drive.readonly`. If the Google sign-in app is in Testing mode, Google expires this token after 7 days.
 - Register each spreadsheet in **Settings → Planning and intake spreadsheets** (admin): role (annual calendar, seasonal program, intake), business, year, link, file type (Google Sheet or .xlsx in Drive) and interval. No code change.
-- The scheduled function runs every 15 minutes and syncs only sources whose interval has elapsed. **Refresh from spreadsheet** runs one immediately (editor).
+- Syncs run as background jobs. Netlify stops scheduled functions after 30 seconds, so the scheduled function (every 15 minutes) only queues the spreadsheets whose interval has elapsed and starts the background function for each; **Refresh from spreadsheet** (editor) queues one the same way and the page follows the job until it finishes. The background function runs for up to 15 minutes.
+- Start requests to the background function are signed with a key derived from `SESSION_SECRET` and must be less than 5 minutes old; a job runs only while it is still queued, so a repeated request does nothing.
+- One queued or running job per spreadsheet (and one Plant Revenue Breakdown pull): a second refresh reports that a sync is already running. A job that has not finished within its 16-minute lease is marked abandoned and a new one may start. Failed, timed-out and abandoned jobs never change promotions or figures; the last successful data stays.
+- Jobs are per spreadsheet, but applying a calendar is serialized per business: a transaction-scoped database lock is taken before existing promotions are read, so an annual and a seasonal sync running at the same time never both create the same promotion, and each sees the other's ownership (seasonal precedence holds in either order).
 - Identity: discount code, then Shopify discount id, then vendor (for vendor offers), collection path (special collections), otherwise title plus start date. Identities are stored in `promotion_source_links`; the row number is informational only. A row whose code changed but whose dates match exactly one unseen promotion is linked to it and flagged for confirmation.
 - The same promotion in two monthly tabs is one record; disagreeing values become a conflict review item.
 - A missing row is flagged `removed_from_source`, never deleted. A blank tab (for example a month owned by the seasonal sheet) is not a cancellation. A failed read changes nothing; the last successful data stays and Settings shows the failure.
@@ -121,5 +129,5 @@ Not done in this delivery. When approved:
 ## 10. Rollback
 
 - App: redeploy the previous Netlify deploy (instant rollback in Netlify).
-- Database: export first (`pg_dump --data-only`), then run the rollback scripts in reverse order: `003_reference_data.down.sql`, `002_planning_tasks_reviews_reports.down.sql`, `001_foundation.down.sql`. Each removes its own `schema_migrations` row. Attachment blobs are not deleted by SQL; delete the `private-attachments` blob store separately if required.
+- Database: export first (`pg_dump --data-only`), then run the rollback scripts in reverse order: `004_sync_jobs.down.sql`, `003_reference_data.down.sql`, `002_planning_tasks_reviews_reports.down.sql`, `001_foundation.down.sql`. Each removes its own `schema_migrations` row. Attachment blobs are not deleted by SQL; delete the `private-attachments` blob store separately if required.
 - Spreadsheets are never written, so no spreadsheet rollback is needed.

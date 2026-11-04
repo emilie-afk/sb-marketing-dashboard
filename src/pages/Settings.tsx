@@ -8,16 +8,33 @@ export function SettingsPage({ role }: { role: string }) {
   const reviews = useApi<any>("/review-items");
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<any>(null);
-  const refresh = async (id: string) => { setBusy(id); try { setResult(await api(`/settings/sheet-sources/${id}/refresh`, { method: "POST" })); s.reload(); reviews.reload(); } catch (e: any) { setResult({ outcome: "failed", error: e.message }); } finally { setBusy(null); } };
+  // The sync runs in the background; follow the job until it finishes (or stop watching after 16 minutes).
+  const refresh = async (id: string) => {
+    setBusy(id); setResult({ outcome: "started" });
+    try {
+      const start = await api(`/settings/sheet-sources/${id}/refresh`, { method: "POST" });
+      if (start.outcome === "failed" || !start.job_id) { setResult(start.outcome === "failed" ? start : { outcome: "failed", error: "The sync could not be started." }); return; }
+      if (start.outcome === "already_running") setResult({ outcome: "started", note: "A sync of this spreadsheet is already running. Showing its result when it finishes." });
+      const until = Date.now() + 16 * 60_000;
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const j = await api(`/settings/sync-jobs/${start.job_id}`);
+        if (["succeeded", "failed", "abandoned"].includes(j.status)) { setResult(j.result ?? { outcome: "failed", error: j.error ?? "The sync did not finish." }); break; }
+        if (Date.now() > until) { setResult({ outcome: "failed", error: "The sync is taking longer than expected. Check back later" }); break; }
+      }
+      s.reload(); reviews.reload();
+    } catch (e: any) { setResult({ outcome: "failed", error: e.message }); } finally { setBusy(null); }
+  };
   return <Async s={s}>{(d) => <div>
     <Section title="Planning and intake spreadsheets" sub="One-way sync: spreadsheet to dashboard. The dashboard never writes to a spreadsheet. A failed read keeps the last successful data.">
-      {!d.sheetReaderConfigured && <div className="notice">Spreadsheet reading is not configured on the server yet (Google read-only credential missing). Registered sheets cannot sync until it is set.</div>}
+      {!d.sheetReaderConfigured && <div className="notice">Spreadsheet reading is not configured on the server yet (spreadsheet reader address and key, or Google read-only credential, missing). Registered sheets cannot sync until it is set.</div>}
       <div className="table-wrap"><table><thead><tr><th>Spreadsheet</th><th>Role</th><th>Business / year</th><th>Last successful sync</th><th>Last problem</th><th></th></tr></thead>
         <tbody>{d.sheets.map((x: any) => <tr key={x.id}><td><b>{x.label}</b>{!x.active && <span className="chip muted"> paused</span>}</td><td>{x.role.replace(/_/g, " ")}</td><td>{BUSINESS_NAMES[x.business_id]} {x.year ?? ""}</td>
           <td>{when(x.last_success_at)}</td><td className={x.last_error ? "bad" : "sub"}>{x.last_error ?? "None"}</td>
-          <td>{role !== "viewer" && <button className="btn small" disabled={busy === x.id} onClick={() => refresh(x.id)}>{busy === x.id ? "Reading…" : "Refresh from spreadsheet"}</button>}</td></tr>)}
+          <td>{role !== "viewer" && (() => { const running = busy === x.id || (d.activeJobs ?? []).some((j: any) => j.sheet_source_id === x.id);
+            return <button className="btn small" disabled={!!busy || running} onClick={() => refresh(x.id)}>{running ? "Syncing…" : "Refresh from spreadsheet"}</button>; })()}</td></tr>)}
           {!d.sheets.length && <tr><td colSpan={6} className="sub">No spreadsheets registered.</td></tr>}</tbody></table></div>
-      {result && <div className={`state ${result.outcome === "failed" ? "error" : ""}`} style={{ marginTop: 8 }}>{result.outcome === "failed" ? `Sync failed: ${result.error}. Previous data is unchanged.` : `Sync ${result.outcome}: ${result.created ?? 0} new, ${result.updated ?? 0} updated, ${result.unchanged ?? 0} unchanged, ${result.reviews ?? 0} for review.`}
+      {result && <div className={`state ${result.outcome === "failed" ? "error" : ""}`} style={{ marginTop: 8 }}>{result.outcome === "started" ? (result.note ?? "Sync started. Reading the spreadsheet in the background…") : result.outcome === "failed" ? `Sync failed: ${String(result.error ?? "").replace(/\.$/, "")}. Previous data is unchanged.` : `Sync ${result.outcome}: ${result.created ?? 0} new, ${result.updated ?? 0} updated, ${result.unchanged ?? 0} unchanged, ${result.reviews ?? 0} for review.`}
         {result.receipts && <ul className="list">{result.receipts.map((r: any, i: number) => <li key={i}>{r.label}: {r.outcome}. {r.message}</li>)}</ul>}</div>}
       {role === "admin" && <RegisterSheet onDone={s.reload} />}
     </Section>

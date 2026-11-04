@@ -3,7 +3,8 @@ import type { Router } from "../router";
 import { query, one } from "../db";
 import { badRequest, notFound, readJson, HttpError } from "../http";
 import { createClient, listClients, revokeClient } from "../automation";
-import { runSheetSync } from "../sheetSync";
+import { enqueueSheetSync, getJob, activeJobs } from "../syncJobs";
+import { json } from "../http";
 import { readerConfigured } from "../sheetsReader";
 import { sourceStatus } from "./dashboard";
 import { audit } from "../audit";
@@ -22,6 +23,7 @@ export function registerSettings(r: Router) {
   r.get("/settings", async ({ session }) => ({
     ...(await sourceStatus()),
     sheetReaderConfigured: readerConfigured(),
+    activeJobs: await activeJobs(),
     syncRuns: await query(`select r.id, s.label, r.trigger, r.started_at, r.finished_at, r.outcome, r.created_count, r.updated_count, r.unchanged_count, r.review_count, r.error, r.tabs_read
                              from sync_runs r join sheet_sources s on s.id = r.sheet_source_id order by r.started_at desc limit 30`),
     imports: await query(`select id, source_id, business_id, submission_id, revision, corrects_submission_id, to_char(period_start,'YYYY-MM-DD') period_start,
@@ -58,7 +60,17 @@ export function registerSettings(r: Router) {
     return { ok: true };
   }, "admin");
   // "Refresh from spreadsheet"
-  r.post("/settings/sheet-sources/:id/refresh", async ({ params, session }) => runSheetSync(params.id, "manual", session.email));
+  // Queues the sync and starts the background function; the page follows the job until it finishes.
+  r.post("/settings/sheet-sources/:id/refresh", async ({ params, session }) => {
+    const r = await enqueueSheetSync(params.id, "manual", session.email);
+    return json(r, r.outcome === "queued" ? 202 : r.outcome === "already_running" ? 200 : 503);
+  });
+  r.get("/settings/sync-jobs/:id", async ({ params }) => {
+    if (!/^[0-9a-f-]{36}$/.test(params.id)) throw notFound("Sync job");
+    const j = await getJob(params.id);
+    if (!j) throw notFound("Sync job");
+    return j;
+  });
 
   r.post("/settings/automation-clients", async ({ req, session }) => {
     const b = z.object({ label: z.string().trim().min(2).max(120), sources: z.array(z.string().regex(/^[a-z0-9_.*-]{1,60}$/)).min(1).max(20), businesses: z.array(z.enum(["sb", "p2s", "perksradar"])).min(1) })
