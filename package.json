@@ -1,0 +1,43 @@
+{
+  "name": "sb-marketing-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Marketing Dashboard: private Succulents Box marketing workspace (performance, advertising, promotions, tasks, reports)",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx scripts/dev-server.ts",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:demo": "SEED_DEMO_DATA=1 tsx scripts/migrate.ts",
+    "check:public": "tsx scripts/check-public-build.ts",
+    "screenshots": "tsx scripts/screenshots.ts",
+    "toolbox:sync": "tsx scripts/toolbox-sync.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^10.0.0",
+    "exceljs": "4.4.0",
+    "jose": "^6.2.12",
+    "pg": "^8.23.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@netlify/functions": "^6.0.2",
+    "@types/node": "^26.6.4",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "playwright": "^1.64.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}

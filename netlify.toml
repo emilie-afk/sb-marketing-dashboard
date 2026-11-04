@@ -1,0 +1,19 @@
+[build]
+  command = "npm run build && npm run check:public"
+  publish = "dist"
+  functions = "netlify/functions"
+
+# Migrations are NOT run by the build. An operator runs them deliberately (docs/GUIDE.md, "Deploy and migrate").
+
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["exceljs"]
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "same-origin"
+    X-Robots-Tag = "noindex, nofollow"
+    Content-Security-Policy = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"

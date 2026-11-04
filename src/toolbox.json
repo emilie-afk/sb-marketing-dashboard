@@ -1,0 +1,180 @@
+{
+  "source": "https://sb-marketing.netlify.app/",
+  "sections": [
+    {
+      "title": "Content & Writing",
+      "icon": "✦",
+      "tint": "#f7e7a1",
+      "tools": [
+        {
+          "emoji": "🧵",
+          "name": "Threads Post Generator",
+          "description": "Turn a plant and post type into ready-to-edit Threads ideas.",
+          "tag": "Content",
+          "url": "https://sb-thread-post.netlify.app/"
+        },
+        {
+          "emoji": "💬",
+          "name": "Reply Drafter",
+          "description": "Create three on-brand reply options from any Threads post.",
+          "tag": "Replies",
+          "url": "https://sb-reply-drafter.netlify.app/"
+        },
+        {
+          "emoji": "📣",
+          "name": "Daily Pitch Drafter",
+          "description": "Draft the day's pitch in the Succulents Box voice.",
+          "tag": "Pitch",
+          "url": "https://sb-pitch-drafter.netlify.app/"
+        },
+        {
+          "emoji": "✍️",
+          "name": "SB Blog Generator",
+          "description": "Build useful blog drafts that sound like Succulents Box.",
+          "tag": "Blog",
+          "url": "https://sb-blog-gen.netlify.app/"
+        },
+        {
+          "emoji": "🎵",
+          "name": "TikTok Caption Generator",
+          "description": "Create platform-ready TikTok captions in the brand voice.",
+          "tag": "TikTok",
+          "url": "https://sb-tiktok-cap.netlify.app/"
+        },
+        {
+          "emoji": "🌵",
+          "name": "Content Intelligence",
+          "description": "Move from social signals to reviewed content and scripts.",
+          "tag": "Intelligence",
+          "url": "https://sb-content-intelligence.netlify.app/"
+        },
+        {
+          "emoji": "📡",
+          "name": "Signal Intake",
+          "description": "Send raw signals into the Content Intelligence workflow.",
+          "tag": "Intelligence",
+          "url": "https://sb-social-sub.netlify.app/"
+        },
+        {
+          "emoji": "🔑",
+          "name": "Keyword Intelligence",
+          "description": "Generate ad keywords for campaigns.",
+          "tag": "Ads",
+          "url": "https://sb-keyword-intelligence.netlify.app/"
+        }
+      ]
+    },
+    {
+      "title": "Product Listings",
+      "icon": "◇",
+      "tint": "#ffd2c8",
+      "tools": [
+        {
+          "emoji": "🛍️",
+          "name": "Faire Desc Generator",
+          "description": "Generate clear descriptions for Faire snack listings.",
+          "tag": "Faire",
+          "url": "https://sb-faire-snack-desc.netlify.app/"
+        }
+      ]
+    },
+    {
+      "title": "Vendor & Communications",
+      "icon": "↗",
+      "tint": "#cfc6ef",
+      "tools": [
+        {
+          "emoji": "✉️",
+          "name": "Vendor Email Reply",
+          "description": "Draft polished vendor replies in the Succulents Box voice.",
+          "tag": "Vendor",
+          "url": "https://sb-vendor-email.netlify.app/"
+        },
+        {
+          "emoji": "🎁",
+          "name": "Corporate Gifting",
+          "description": "Track corporate gift marketplaces, pricing, progress, and revenue.",
+          "tag": "Gifting",
+          "url": "https://sb-corporate-gifts.netlify.app/"
+        }
+      ]
+    },
+    {
+      "title": "Inventory & Data Checks",
+      "icon": "⌁",
+      "tint": "#c8e9df",
+      "tools": [
+        {
+          "emoji": "🔍",
+          "name": "HPD Missing Products",
+          "description": "Find products that are missing from HPD.",
+          "tag": "HPD",
+          "url": "https://sb-hpd-check.netlify.app/"
+        },
+        {
+          "emoji": "📦",
+          "name": "MCG Inventory Check",
+          "description": "Review current MCG inventory levels.",
+          "tag": "MCG",
+          "url": "https://sb-mcg-check.netlify.app/"
+        },
+        {
+          "emoji": "🏷️",
+          "name": "Price Checker",
+          "description": "Check product pricing and prepare updates.",
+          "tag": "Pricing",
+          "url": "https://sb-price-checker.netlify.app/"
+        }
+      ]
+    },
+    {
+      "title": "Analytics",
+      "icon": "↗",
+      "tint": "#c9dff0",
+      "tools": [
+        {
+          "emoji": "📊",
+          "name": "Plant Revenue Breakdown",
+          "description": "See revenue performance broken down by plant.",
+          "tag": "Revenue",
+          "url": "https://sb-plant-breakdown.netlify.app/"
+        },
+        {
+          "emoji": "💰",
+          "name": "Gross Profit Calculator",
+          "description": "Calculate gross profit by product or order.",
+          "tag": "Profit",
+          "url": "https://sb-profit.netlify.app/"
+        },
+        {
+          "emoji": "🎯",
+          "name": "Competitor Price Checker",
+          "description": "Check competitive pricing across the market.",
+          "tag": "Competitors",
+          "url": "https://sb-price-checker.onrender.com/"
+        }
+      ]
+    },
+    {
+      "title": "Team Operations",
+      "icon": "＋",
+      "tint": "#ead7e7",
+      "tools": [
+        {
+          "emoji": "🚀",
+          "name": "Onboarding Dashboard",
+          "description": "Guide new team members through internal onboarding.",
+          "tag": "Onboarding",
+          "url": "https://sb-onboarding.netlify.app/"
+        },
+        {
+          "emoji": "✓",
+          "name": "Task Tracker",
+          "description": "Keep team tasks and progress visible in one place.",
+          "tag": "Tasks",
+          "url": "https://sb-task-tracker.netlify.app/"
+        }
+      ]
+    }
+  ]
+}

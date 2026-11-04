@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.netlify/
+.local-blobs/
+.env
+.env.*
+!.env.example
+*.local
+private/
+exports/
+*.log
