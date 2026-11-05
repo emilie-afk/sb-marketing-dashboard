@@ -20,7 +20,7 @@ export function originOf(raw: string | undefined): string | null {
   } catch { return null; }
 }
 
-export async function getJson(origin: string, path: string, headers: Record<string, string>, label: string): Promise<any> {
+export async function getJson(origin: string, path: string, headers: Record<string, string>, label: string, onHeaders?: (h: Headers) => void): Promise<any> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), CLIENT_LIMITS.timeoutMs);
   try {
@@ -29,6 +29,7 @@ export async function getJson(origin: string, path: string, headers: Record<stri
     if (r.status === 401 || r.status === 403) { await r.body?.cancel().catch(() => {}); throw new HttpError(502, "source_auth_failed", `${label} refused the reporting credential.`); }
     if (r.status === 503) { await r.body?.cancel().catch(() => {}); throw new HttpError(502, "source_disabled", `${label} has reporting turned off.`); }
     if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new HttpError(502, "source_failed", `${label} returned ${r.status}.`); }
+    onHeaders?.(r.headers);
     const text = await readLimited(r, CLIENT_LIMITS.maxBytes, ctrl.signal, label);
     try { return JSON.parse(text); } catch { throw new HttpError(502, "source_bad_response", `${label} did not return JSON.`); }
   } catch (e) {
