@@ -3,6 +3,10 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { freshDb, call, submit, q, closePool } from "./helpers";
 import { envelope, weekRange } from "./fixtures/synthetic";
 import { formatFig } from "../shared/metrics";
+import { GP_SCOPE } from "../server/adapters/grossProfit";
+
+// Gross profit and its basis arrive at the Gross Profit app's scope (the Shopify store); a test gives another scope explicitly.
+const atGpScope = (obs: any[]) => obs.map((o) => ({ scope: GP_SCOPE, ...o }));
 
 beforeAll(async () => {
   process.env.EXCLUDED_BRANDS = "";
@@ -16,7 +20,7 @@ const wk = (i: number) => weekRange(20 + i);
 const revenue = (id: string, i: number, total: number, channel: number) => submit({ ...envelope(id, "sb", wk(i)), records: { observations: [
   { metric: "revenue", value: total }, { metric: "orders", value: 10 }, { metric: "revenue", scope: "channel:online_store", value: channel }] } }, "submission.api", WEEKLY);
 const gp = (id: string, i: number, obs: any[], extra: Record<string, unknown> = {}, submitter = GP, source = "submission.api") =>
-  submit({ ...envelope(id, "sb", wk(i), "week", extra), source: "gross_profit", records: { observations: obs } }, source, submitter);
+  submit({ ...envelope(id, "sb", wk(i), "week", extra), source: "gross_profit", records: { observations: atGpScope(obs) } }, source, submitter);
 const margin = async (i: number) => (await call("viewer", "GET", `/business/sb/profitability?start=${wk(i).start}&end=${wk(i).end}&compare=none`)).body.metrics.find((m: any) => m.key === "margin");
 const metric = async (i: number, key: string, scope = "all") => {
   const r = await call("viewer", "GET", `/business/sb/summary?start=${wk(i).start}&end=${wk(i).end}&compare=none`);
@@ -34,7 +38,7 @@ describe("gross margin uses the revenue basis sent with the gross profit", () =>
     ok(await gp("gp-3-basis", 3, [{ metric: "gross_profit_revenue_basis", value: 800 }], {}, OTHER));                 // basis from another integration
     ok(await gp("gp-4", 4, [{ metric: "gross_profit", value: 200 }]));
     ok(await submit({ ...envelope("gp-4-basis", "sb", wk(4)), period: { ...wk(4), granularity: "week", timezone: "UTC" }, source: "gross_profit",
-      records: { observations: [{ metric: "gross_profit_revenue_basis", value: 800 }] } }, "submission.api", GP));                // different timezone
+      records: { observations: atGpScope([{ metric: "gross_profit_revenue_basis", value: 800 }]) } }, "submission.api", GP));                // different timezone
     ok(await gp("gp-5", 5, [{ metric: "gross_profit", value: 200 }, { metric: "gross_profit_revenue_basis", scope: "channel:online_store", value: 800 }])); // other accounting scope
     ok(await gp("gp-6", 6, [{ metric: "gross_profit", value: 200 }, { metric: "gross_profit_revenue_basis", value: 800 }], { completeness: "provisional" }));
     ok(await gp("gp-7", 7, [{ metric: "gross_profit", value: 200 }, { metric: "gross_profit_revenue_basis", value: 800 }], { completeness: "incomplete" }));

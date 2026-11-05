@@ -27,6 +27,33 @@ describe("spreadsheet reading", () => {
     const s = parseSeasonalProgram(await workbookToSheets(await toXlsx(seasonalWorkbook(2026) as any)), 2026);
     expect(s.promotions.find((x) => x.identityKey === "vendor:fernwood-growers-demo" && !x.crossCheckOnly)).toMatchObject({ vendor_cost_reduction: 7, customer_discount: 12 });
   });
+  it("converts a calendar shaped like the real one (13 tabs of ~1,000 formatted rows) quickly", async () => {
+    // Real calendars carry formatting down ~1,000 rows and across 26 columns on every tab while holding a few
+    // rows of data. Reading the tab width once per cell made this take minutes; it must take about a second.
+    const wb = new ExcelJS.Workbook();
+    for (let s = 0; s < 13; s++) {
+      const ws = wb.addWorksheet(s === 0 ? "Holiday Calendar 2026" : `Tab ${s}`);
+      ws.columns = Array.from({ length: 26 }, () => ({ width: 12 }));
+      ws.addRow(["Date", "Discount", "Name", "Code"]);
+      ws.addRow(["Jan 2 - 9", "10%", "Demo new year", `DEMO${s}`]);
+      for (let r = 3; r <= 1000; r++) ws.getRow(r).getCell(26).style = { font: { bold: true } };
+    }
+    const buf = Buffer.from(await wb.xlsx.writeBuffer());
+    const t0 = Date.now();
+    const sheets = await workbookToSheets(buf);
+    expect(Date.now() - t0).toBeLessThan(8000);
+    expect(sheets).toHaveLength(13);
+    expect(sheets[1].rows.length).toBe(1000);
+    expect(sheets[1].rows[1].slice(0, 4)).toEqual(["Jan 2 - 9", "10%", "Demo new year", "DEMO1"]);
+  }, 20000);
+  it("refuses a workbook with more cells than the limit instead of grinding through it", async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Huge");
+    ws.columns = Array.from({ length: 200 }, () => ({ width: 5 }));
+    for (let r = 1; r <= 10_001; r++) ws.getRow(r).getCell(200).style = { font: { bold: true } };
+    const buf = Buffer.from(await wb.xlsx.writeBuffer());
+    await expect(workbookToSheets(buf)).rejects.toMatchObject({ code: "too_large" });
+  }, 60000);
   it("columns are found by header and content, not position", async () => {
     const p = parseAnnualCalendar(annualWorkbook(2026), 2026);
     const earth = p.promotions.find((x) => x.code === "DEMOEARTH")!;   // discount before name in this tab
@@ -177,13 +204,13 @@ describe("Plant Revenue Breakdown adapter", () => {
   it("maps a saved report to a valid submission with explicit channel scope and missing costs", () => {
     const body = reportToSubmission({ id: "shopify:total_sales_by_product:2026-09-01:2026-09-30:r2", source: "shopify", report_scope: "total_sales_by_product",
       period_start: "2026-09-01", period_end: "2026-09-30", timezone: "America/Los_Angeles", revision: 2, status: "active", collected_at: "2026-10-01T10:00:00Z", completeness: "complete" },
-      [{ product_id: "1", title: "Demo plant", vendor: "Demo vendor", product_type: "Succulent", units: 3, net: 30 }, { product_id: "2", title: "x", vendor: "Excluded Demo Brand", product_type: "", units: 1, net: 9 }]);
+      [{ productId: "1", title: "Demo plant", vendor: "Demo vendor", productType: "Succulent", cur: { units: 3, net: 30 } }, { productId: "2", title: "x", vendor: "Excluded Demo Brand", productType: "", cur: { units: 1, net: 9 } }]);
     expect(body.period.granularity).toBe("month");
     const c = checkSubmission(body);
     expect(c.ok).toBe(true);
     if (c.ok) {
       expect(c.value.accepted.products).toHaveLength(1);
-      expect(c.value.accepted.products[0]).toMatchObject({ channel_scope: "channel:shopify_report", cost_state: "missing", gross_profit: null });
+      expect(c.value.accepted.products[0]).toMatchObject({ external_id: "pid:1", category: "Succulent", revenue: 30, units: 3, channel_scope: "channel:shopify_report", cost_state: "missing", gross_profit: null });
     }
   });
 });

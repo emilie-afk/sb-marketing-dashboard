@@ -135,8 +135,9 @@ function Profitability({ period, setPeriod }: { period: Period; setPeriod: (p: P
   return <Async s={s}>{(d) => d.empty ? <div className="state unavailable">{d.message}</div> : (
     <>
       <Bar d={d} setPeriod={setPeriod} />
-      {d.source?.status === "blocked" && <div className="notice">Live connection to the Gross Profit application is not available yet: {d.source.blocked_reason} Figures below come only from submitted saved results. The dashboard does not recalculate profit.</div>}
-      <Section title="Gross profit and costs"><div className="grid g4">{d.metrics.map((m: any) => <MetricTile key={m.key} m={m} />)}</div></Section>
+      {d.source && d.source.status !== "ok" && <div className="notice">{d.source.status === "failing" ? `The Gross Profit app could not be read: ${d.source.last_error ?? "see Settings"}. Figures below are the last successful data.` : "The Gross Profit app is not connected yet. Figures below come only from saved results."} The dashboard does not recalculate profit.</div>}
+      <Section title="Gross profit and costs" sub={`Published weekly results from the Gross Profit app, for the ${d.scopeLabel}. Business revenue (all channels) is shown for context only and is not the basis of the margin.`}>
+        <div className="grid g4">{d.metrics.map((m: any) => <MetricTile key={`${m.key}:${m.scope ?? ""}`} m={m} />)}</div></Section>
       <Section title="Trends"><TrendPanel trends={d.trends} initial={d.trends.map((t: any) => `${t.business}:${t.key}`)} /></Section>
       <Section title="Cost coverage"><div className="card flat">{d.products.costCoverage.products ? `${d.products.costCoverage.products - d.products.costCoverage.missingCost} of ${d.products.costCoverage.products} products have a known cost. ${d.products.costCoverage.missingCost} are missing cost and are excluded from gross profit and margin (not counted as zero).` : "No product-level results for this period."}</div></Section>
       <Section title="By vendor"><VendorTable vendors={d.products.vendors} /></Section>
@@ -227,9 +228,9 @@ export function PromotionDrawer({ id, role, onClose }: { id: string; role: strin
 function Corporate({ period }: { period: Period }) {
   const s = usePeriodData("/business/sb/corporate", period);
   return <Async s={s}>{(d) => <>
-    {d.source?.status === "blocked" && <Unavailable title="Corporate Gifting connection" reason={d.source.blocked_reason} />}
-    <p className="sub">{d.note}</p>
-    {d.metrics.length > 0 && <div className="grid g4">{d.metrics.map((m: any) => <MetricTile key={m.key} m={{ ...m, label: "Corporate revenue" }} />)}</div>}
+    {d.source && d.source.status !== "ok" && <Unavailable title="Corporate Gifting connection" reason={d.source.status === "failing" ? `The Corporate Gifting app could not be read: ${d.source.last_error ?? "see Settings"}. Figures below are the last successful data.` : "The Corporate Gifting app is not connected yet."} />}
+    <p className="sub">{d.note} Monthly figures from the Corporate Gifting app. Orders and units count Shopify orders only; a month with manually recorded sales shows them as incomplete.</p>
+    {d.metrics.length > 0 && <div className="grid g4">{d.metrics.map((m: any) => <MetricTile key={m.key} m={{ ...m, label: m.key === "revenue" ? "Corporate revenue" : m.key === "orders" ? "Corporate orders" : "Corporate units" }} />)}</div>}
     <p>Marketplace outreach, proposals, requirements and follow-ups are edited in the <a href="https://sb-corporate-gifts.netlify.app/" target="_blank" rel="noreferrer">Corporate Gifting app</a>.</p>
   </>}</Async>;
 }

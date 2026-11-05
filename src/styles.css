@@ -87,6 +87,7 @@ tr.superseded td { color: var(--muted); text-decoration: line-through; }
 /* states */
 .state { border: 1.5px dashed rgba(7, 63, 53, .3); border-radius: var(--radius-s); padding: 14px; color: var(--muted); background: var(--cream); }
 .state.error { border-color: var(--bad); color: var(--bad); }
+.state.warn { border-color: var(--warn); color: var(--warn); background: #fff8e5; }
 .state.unavailable { background: #f4f4f0; }
 .notice { border-left: 4px solid var(--warn); background: #fff8e5; padding: 8px 12px; border-radius: 8px; font-size: 13px; margin: 8px 0; }
 .status-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; border-radius: 999px; padding: 4px 10px; background: var(--brand-pale); border: 0; cursor: pointer; }

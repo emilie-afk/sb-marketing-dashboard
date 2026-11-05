@@ -1,29 +1,44 @@
 import { useState } from "react";
 import { useApi, Async, Section, when, api, BUSINESS_NAMES } from "../lib";
 
-const STATUS_LABEL: Record<string, string> = { ok: "Connected", failing: "Failing", blocked: "Needs a source change", not_configured: "Not configured" };
+const STATUS_LABEL: Record<string, string> = { ok: "Connected", failing: "Failing", blocked: "Needs a source change", not_configured: "Not configured", waiting: "Waiting for first read" };
 
 export function SettingsPage({ role }: { role: string }) {
   const s = useApi<any>("/settings");
   const reviews = useApi<any>("/review-items");
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<any>(null);
-  // The sync runs in the background; follow the job until it finishes (or stop watching after 16 minutes).
-  const refresh = async (id: string) => {
-    setBusy(id); setResult({ outcome: "started" });
+  const [pullBusy, setPullBusy] = useState<string | null>(null);
+  const [pullResult, setPullResult] = useState<any>(null);
+  // Syncs and pulls run in the background; follow the job until it finishes (or stop watching after 16 minutes).
+  const follow = async (startPath: string, setRes: (r: any) => void, already: string) => {
+    setRes({ outcome: "started" });
     try {
-      const start = await api(`/settings/sheet-sources/${id}/refresh`, { method: "POST" });
-      if (start.outcome === "failed" || !start.job_id) { setResult(start.outcome === "failed" ? start : { outcome: "failed", error: "The sync could not be started." }); return; }
-      if (start.outcome === "already_running") setResult({ outcome: "started", note: "A sync of this spreadsheet is already running. Showing its result when it finishes." });
+      const start = await api(startPath, { method: "POST" });
+      if (start.outcome === "failed" || !start.job_id) { setRes(start.outcome === "failed" ? start : { outcome: "failed", error: "The sync could not be started." }); return; }
+      if (start.outcome === "already_running") setRes({ outcome: "started", note: already });
       const until = Date.now() + 16 * 60_000;
       for (;;) {
         await new Promise((r) => setTimeout(r, 2500));
         const j = await api(`/settings/sync-jobs/${start.job_id}`);
-        if (["succeeded", "failed", "abandoned"].includes(j.status)) { setResult(j.result ?? { outcome: "failed", error: j.error ?? "The sync did not finish." }); break; }
-        if (Date.now() > until) { setResult({ outcome: "failed", error: "The sync is taking longer than expected. Check back later" }); break; }
+        if (["succeeded", "partial", "failed", "abandoned"].includes(j.status)) { setRes(j.result ?? { outcome: "failed", error: j.error ?? "The sync did not finish." }); break; }
+        if (Date.now() > until) { setRes({ outcome: "failed", error: "The sync is taking longer than expected. Check back later" }); break; }
       }
       s.reload(); reviews.reload();
-    } catch (e: any) { setResult({ outcome: "failed", error: e.message }); } finally { setBusy(null); }
+    } catch (e: any) { setRes({ outcome: "failed", error: e.message }); }
+  };
+  const refresh = async (id: string) => {
+    setBusy(id);
+    try { await follow(`/settings/sheet-sources/${id}/refresh`, setResult, "A sync of this spreadsheet is already running. Showing its result when it finishes."); } finally { setBusy(null); }
+  };
+  const refreshPull = async (sourceId: string) => {
+    setPullBusy(sourceId);
+    try { await follow(`/settings/sources/${sourceId}/refresh`, setPullResult, "This source is already being read. Showing the result when it finishes."); } finally { setPullBusy(null); }
+  };
+  const pullSummary = (r: any) => {
+    const rs: any[] = r.results ?? [];
+    const count = (o: string) => rs.filter((x) => x.outcome === o).length;
+    return `${r.outcome === "partial" ? "Read finished with problems" : "Read finished"}: ${count("accepted")} new or corrected, ${count("unchanged")} unchanged, ${count("rejected") + count("failed")} not imported.${r.error ? ` ${r.error}.` : ""}`;
   };
   return <Async s={s}>{(d) => <div>
     <Section title="Planning and intake spreadsheets" sub="One-way sync: spreadsheet to dashboard. The dashboard never writes to a spreadsheet. A failed read keeps the last successful data.">
@@ -47,10 +62,18 @@ export function SettingsPage({ role }: { role: string }) {
       </li>)}</ul> : <div className="state">Nothing to review.</div>}</Async>
     </Section>
 
-    <Section title="Data sources" sub="What each source provides today. Blocked sources need a change in that application first.">
-      <div className="table-wrap"><table><thead><tr><th>Source</th><th>Status</th><th>Last success</th><th>Data collected</th><th>Notes</th></tr></thead>
-        <tbody>{d.sources.map((x: any) => <tr key={x.id}><td><b>{x.label}</b></td><td><span className={`chip ${x.status === "ok" ? "" : x.status === "failing" ? "bad" : "warn"}`}>{STATUS_LABEL[x.status]}</span></td>
-          <td>{when(x.last_success_at)}</td><td>{when(x.last_collected)}</td><td className="sub">{x.blocked_reason ?? x.last_error ?? ""}</td></tr>)}</tbody></table></div>
+    <Section title="Data sources" sub="What each source provides today. Reporting sources are read hourly with their own read-only credentials. Blocked sources need a change in that application first.">
+      <div className="table-wrap"><table><thead><tr><th>Source</th><th>Status</th><th>Last success</th><th>Data collected</th><th>Notes</th><th></th></tr></thead>
+        <tbody>{d.sources.map((x: any) => {
+          const pull = (d.pulls ?? []).find((p: any) => p.sourceId === x.id);
+          const running = pullBusy === x.id || (d.activeJobs ?? []).some((j: any) => j.kind === pull?.kind);
+          const status = pull && pull.configured && x.status === "not_configured" ? "waiting" : x.status;
+          return <tr key={x.id}><td><b>{x.label}</b></td><td><span className={`chip ${status === "ok" ? "" : status === "failing" ? "bad" : "warn"}`}>{STATUS_LABEL[status] ?? status}</span></td>
+            <td>{when(x.last_success_at)}</td><td>{when(x.last_collected)}</td><td className="sub">{pull?.held ?? x.blocked_reason ?? x.last_error ?? ""}</td>
+            <td>{role !== "viewer" && pull?.configured && <button className="btn small" disabled={!!pullBusy || running} onClick={() => refreshPull(x.id)}>{running ? "Reading…" : "Refresh now"}</button>}</td></tr>;
+        })}</tbody></table></div>
+      {pullResult && <div className={`state ${pullResult.outcome === "failed" ? "error" : pullResult.outcome === "partial" ? "warn" : ""}`} style={{ marginTop: 8 }}>{pullResult.outcome === "started" ? (pullResult.note ?? "Reading the source in the background…")
+        : pullResult.outcome === "failed" ? `Read failed: ${String(pullResult.error ?? "").replace(/\.$/, "")}.` : pullSummary(pullResult)}</div>}
     </Section>
 
     <Section title="Recent imports" sub="Every submission gets a receipt. Rejected and failed imports never replace earlier data.">
