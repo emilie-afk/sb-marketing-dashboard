@@ -18,6 +18,8 @@ import type { Sheet, Cell } from "../shared/calendarParse";
 import { HttpError } from "./http";
 
 const MAX_BYTES = 20 * 1024 * 1024;
+// Upper bound on cells read from one workbook (all tabs), so a sheet formatted to a huge range fails clearly.
+const MAX_CELLS = 2_000_000;
 const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 export type SheetReader = (fileId: string, kind: "google_sheet" | "xlsx") => Promise<Sheet[]>;
@@ -178,11 +180,18 @@ export async function workbookToSheets(buf: Buffer | ArrayBuffer): Promise<Sheet
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buf as any);
   const out: Sheet[] = [];
+  let total = 0;
   wb.eachSheet((ws) => {
     const rows: Cell[][] = [];
+    // ExcelJS recomputes columnCount by scanning every row on each access, so read it once per tab. (Reading it
+    // per cell made real calendars with ~1,000 formatted rows per tab take longer than the background limit.)
+    const width = ws.columnCount;
     ws.eachRow({ includeEmpty: true }, (row, n) => {
       const cells: Cell[] = [];
-      for (let c = 1; c <= Math.max(row.cellCount, ws.columnCount); c++) cells.push(cellValue(row.getCell(c).value));
+      const last = Math.max(row.cellCount, width);
+      total += last;
+      if (total > MAX_CELLS) throw new HttpError(413, "too_large", `The spreadsheet has more than ${MAX_CELLS.toLocaleString("en-US")} cells.`);
+      for (let c = 1; c <= last; c++) cells.push(cellValue(row.getCell(c).value));
       rows[n - 1] = cells;
     });
     for (let i = 0; i < rows.length; i++) if (!rows[i]) rows[i] = [];

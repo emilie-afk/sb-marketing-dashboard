@@ -1,3 +1,5 @@
+import { GP_SCOPE, GP_SCOPE_LABEL, GP_SOURCE_ID } from "../adapters/grossProfit";
+import { CG_SCOPE, CG_SOURCE_ID } from "../adapters/corporateGifting";
 import type { Router } from "../router";
 import { query, one } from "../db";
 import { badRequest, notFound } from "../http";
@@ -255,10 +257,10 @@ async function channelFigures(b: string, scope: string, range: DateRange) {
   return { revenue: r.value.state === "value" ? r.value.value : null, orders: o.value.state === "value" ? o.value.value : null };
 }
 
-export async function trendsFor(end: string, metrics?: Record<string, string[]>) {
+export async function trendsFor(end: string, metrics?: Record<string, string[]>, scope = "all") {
   const out: any[] = [];
   for (const [b, keys] of Object.entries(metrics ?? TREND_METRICS)) for (const k of keys) {
-    const t = await trend(b, k, "all", end);
+    const t = await trend(b, k, scope, end);
     if (t.points.some((p) => p.value.state !== "missing")) out.push({ business: b, ...t });
   }
   return out;
@@ -300,15 +302,18 @@ export function registerDashboard(r: Router) {
         return { work: await workSummary(b, today) };
       case "profitability": {
         if (!range) return empty;
-        // Business revenue is shown for context only; margin uses the revenue basis sent with the gross profit.
-        const keys = ["gross_profit", "gross_profit_revenue_basis", "margin", "product_cost", "shipping_cost", "revenue"];
-        const metrics = []; for (const k of keys) metrics.push(await compared(b, k, "all", range, compare));
-        return { period: { ...range, label: formatRange(range) }, metrics, trends: await trendsFor(range.end, { [b]: ["gross_profit", "margin"] }),
-          products: await productsAndVendors(b, range, compare), source: await one("select * from source_connections where id = 'blocked.gross_profit'") };
+        // Gross profit and its costs are reported by the Gross Profit app for the Shopify store, never as the business
+        // total. Margin uses the revenue basis sent with that gross profit; business revenue is shown for context only.
+        const keys = ["gross_profit", "gross_profit_revenue_basis", "margin", "product_cost", "shipping_cost"];
+        const metrics = []; for (const k of keys) metrics.push(await compared(b, k, GP_SCOPE, range, compare));
+        metrics.push(await compared(b, "revenue", "all", range, compare));
+        return { period: { ...range, label: formatRange(range) }, metrics, scopeLabel: GP_SCOPE_LABEL,
+          trends: await trendsFor(range.end, { [b]: ["gross_profit", "margin"] }, GP_SCOPE),
+          products: await productsAndVendors(b, range, compare), source: await one("select * from source_connections where id = $1", [GP_SOURCE_ID]) };
       }
       case "corporate":
-        return { source: await one("select * from source_connections where id = 'blocked.corporate_gifting'"),
-          metrics: range ? [await compared(b, "revenue", "channel:corporate", range, compare)] : [],
+        return { source: await one("select * from source_connections where id = $1", [CG_SOURCE_ID]),
+          metrics: range ? [await compared(b, "revenue", CG_SCOPE, range, compare), await compared(b, "orders", CG_SCOPE, range, compare), await compared(b, "units", CG_SCOPE, range, compare)] : [],
           note: "Corporate revenue may overlap other sales channels and is never added to business totals." };
       default: throw notFound("Section");
     }

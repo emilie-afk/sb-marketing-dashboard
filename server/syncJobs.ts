@@ -13,7 +13,9 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { one, query, tx } from "./db";
 import { HttpError } from "./http";
 import { runSheetSync, dueSources } from "./sheetSync";
-import { pullPlantBreakdown, plantBreakdownConfigured } from "./adapters/plantBreakdown";
+import { pullPlantBreakdown, plantBreakdownConfigured, PB_SOURCE_ID } from "./adapters/plantBreakdown";
+import { pullGrossProfit, grossProfitConfigured, GP_SOURCE_ID } from "./adapters/grossProfit";
+import { pullCorporateGifting, corporateGiftingConfigured, corporateGiftingHeld, CG_SOURCE_ID } from "./adapters/corporateGifting";
 import { logServerError, redact } from "./redact";
 
 export const JOB_LIMITS = {
@@ -25,7 +27,16 @@ export const BACKGROUND_PATH = "/.netlify/functions/sheet-sync-background";
 const SIG_HEADER = "x-mkd-job-signature";
 const TS_HEADER = "x-mkd-job-timestamp";
 
-type Job = { id: string; kind: "sheet" | "plant_breakdown"; sheet_source_id: string | null; trigger: "schedule" | "manual"; actor: string };
+export type PullKind = "plant_breakdown" | "gross_profit" | "corporate_gifting";
+/** Reporting pulls from the team's other apps (read-only APIs, each with its own credential). */
+export const PULLS: Record<PullKind, { sourceId: string; label: string; configured: () => boolean; held?: () => string | null; run: (actor: string) => Promise<any> }> = {
+  plant_breakdown: { sourceId: PB_SOURCE_ID, label: "Plant Revenue Breakdown", configured: plantBreakdownConfigured, run: (a) => pullPlantBreakdown(a) },
+  gross_profit: { sourceId: GP_SOURCE_ID, label: "Gross Profit", configured: grossProfitConfigured, run: (a) => pullGrossProfit(a) },
+  corporate_gifting: { sourceId: CG_SOURCE_ID, label: "Corporate Gifting", configured: corporateGiftingConfigured, held: corporateGiftingHeld, run: (a) => pullCorporateGifting(a) },
+};
+export const pullKindForSource = (sourceId: string) => (Object.entries(PULLS).find(([, p]) => p.sourceId === sourceId)?.[0] ?? null) as PullKind | null;
+
+type Job = { id: string; kind: "sheet" | PullKind; sheet_source_id: string | null; trigger: "schedule" | "manual"; actor: string };
 export type EnqueueResult = { outcome: "queued"; job_id: string } | { outcome: "already_running"; job_id: string | null } | { outcome: "failed"; job_id: string; error: string };
 
 function jobKey() {
@@ -101,8 +112,55 @@ export async function enqueueSheetSync(sourceId: string, trigger: Job["trigger"]
 /** Scheduled function: queue every due spreadsheet (and the hourly pull). Does no reading itself. */
 export async function enqueueScheduled(now = new Date()) {
   const work: Promise<EnqueueResult>[] = (await dueSources()).map((s) => enqueue("sheet", s.id, "schedule", "schedule"));
-  if (plantBreakdownConfigured() && now.getUTCMinutes() < 15) work.push(enqueue("plant_breakdown", null, "schedule", "schedule"));
+  // Each configured reporting pull once an hour.
+  if (now.getUTCMinutes() < 15) for (const [kind, p] of Object.entries(PULLS) as [PullKind, (typeof PULLS)[PullKind]][]) if (p.configured()) work.push(enqueue(kind, null, "schedule", "schedule"));
   return Promise.all(work);
+}
+
+/** "Refresh now" for a reporting pull (Settings → Data sources). */
+export async function enqueuePull(kind: PullKind, trigger: Job["trigger"], actor: string) {
+  if (!PULLS[kind].configured()) throw new HttpError(409, "not_configured", `${PULLS[kind].label} is not configured on the server.`);
+  return enqueue(kind, null, trigger, actor);
+}
+
+/**
+ * Runs one pull and classifies it honestly. Succeeded: every record accepted or unchanged and paging finished.
+ * Partial: some records imported, but others were rejected or failed, or paging did not finish. Failed: nothing
+ * could be imported, or the source could not be read. Partial and failed mark the source failing with the reason;
+ * previous data is always kept.
+ */
+async function runPull(kind: PullKind, actor: string) {
+  const p = PULLS[kind];
+  const fail = async (msg: string) => {
+    await query("update source_connections set status = 'failing', last_failure_at = now(), last_error = $2, updated_at = now() where id = $1", [p.sourceId, redact(msg, 500)]).catch(() => {});
+  };
+  let r: any;
+  try {
+    r = await p.run(actor);
+  } catch (e) {
+    // Thrown only before any record was applied (e.g. the report list could not be read).
+    const msg = `${e instanceof HttpError ? e.message.replace(/\.$/, "") : `${p.label} could not be read`}. Previous data is unchanged`;
+    if (!(e instanceof HttpError)) logServerError(`pull-${kind}`, e);
+    await fail(msg);
+    return { outcome: "failed", error: msg };
+  }
+  if (r?.outcome === "not_configured") return { ...r, outcome: "failed", error: `${p.label} is not configured.` };
+  const results: any[] = r?.results ?? [];
+  const bad = results.filter((x) => x.outcome === "rejected" || x.outcome === "failed");
+  const good = results.filter((x) => x.outcome === "accepted" || x.outcome === "unchanged");
+  // Saved, but with some of its records rejected by validation (now, or when that same revision was stored).
+  const incomplete = good.filter((x) => (Array.isArray(x.rejected) && x.rejected.length > 0) || Number(x.stored_with_rejected) > 0);
+  const problems: string[] = [...(r?.problems ?? [])];
+  if (bad.length) problems.push(`${bad.length} record(s) not imported (${[...new Set(bad.map((x) => x.outcome))].join(", ")}); see Recent imports`);
+  if (incomplete.length) problems.push(`${incomplete.length} record(s) saved with some of their rows rejected; see Recent imports`);
+  if (!problems.length) {
+    await query("update source_connections set status = 'ok', last_success_at = now(), last_error = null, updated_at = now() where id = $1", [p.sourceId]);
+    return { ...r, outcome: "succeeded" };
+  }
+  const saved = good.length;
+  const error = `${problems.join("; ")}. ${saved ? `${saved} record(s) were saved or already current and are kept; reading again is safe` : "Previous data is unchanged"}`;
+  await fail(error);
+  return { ...r, outcome: saved ? "partial" : "failed", error };
 }
 
 /** Background function: runs one job if it is still queued and its lease is valid. */
@@ -115,12 +173,11 @@ export async function runJob(jobId: string) {
   });
   if (!job) return { ran: false as const };
   try {
-    const result: any = job.kind === "sheet"
-      ? await runSheetSync(job.sheet_source_id!, job.trigger, job.actor)
-      : await pullPlantBreakdown(job.actor);
-    const failed = result?.outcome === "failed";
+    const result: any = job.kind === "sheet" ? await runSheetSync(job.sheet_source_id!, job.trigger, job.actor) : await runPull(job.kind, job.actor);
+    // A partial result (some records not imported, or paging not finished) is recorded as partial, not success.
+    const status = result?.outcome === "failed" ? "failed" : result?.outcome === "partial" ? "partial" : "succeeded";
     await query("update sync_jobs set status = $2, finished_at = now(), result = $3, error = $4 where id = $1 and status = 'running'",
-      [job.id, failed ? "failed" : "succeeded", JSON.stringify(result ?? null), failed ? redact(String(result.error ?? "Sync failed."), 500) : null]);
+      [job.id, status, JSON.stringify(result ?? null), status !== "succeeded" ? redact(String(result?.error ?? (status === "partial" ? "Finished with problems." : "Sync failed.")), 500) : null]);
     return { ran: true as const, result };
   } catch (e) {
     logServerError("sync-job", e);
