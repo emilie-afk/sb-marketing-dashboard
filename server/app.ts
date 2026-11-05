@@ -13,6 +13,7 @@ import { clientFromRequest, assertClientMay } from "./automation";
 import { checkSubmission } from "../shared/submission";
 import { applySubmission } from "./imports";
 import { one } from "./db";
+import { pullCheck } from "./pullCheck";
 
 export function createApp() {
   const r = new Router();
@@ -30,6 +31,7 @@ export function createApp() {
       if (path === "/auth/callback" && req.method === "GET") return await handleCallback(req);
       if (path === "/auth/logout" && req.method === "POST") return logoutResponse(req);
       if (path === "/submissions" && req.method === "POST") return await submission(req);
+      if (path === "/pull-check" && req.method === "POST") return await pullCheck(req);
       let m = /^\/submissions\/([A-Za-z0-9_.:-]{3,120})\/attachments$/.exec(path);
       if (m && req.method === "POST") return await submissionAttachment(req, m[1]);
 
