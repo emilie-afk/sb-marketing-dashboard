@@ -154,6 +154,31 @@ describe("Plant Revenue Breakdown", () => {
     const sold = await q("select count(*)::int n, sum(revenue)::float8 rev, sum(units)::float8 units from product_observations where import_run_id in (select id from import_runs where source_id = 'pull.plant_breakdown')");
     expect(sold[0]).toEqual({ n: 501, rev: 501 * 20, units: 501 * 2 });
   });
+
+  it("sums a product listed on several rows (e.g. one per sales channel) into one record instead of refusing the report", async () => {
+    const dupId = "shopify:total_sales_by_product:2025-02-01:2025-02-28:r1";
+    const line = (pid: string | null, title: string, type: string, units: number, net: number) =>
+      ({ productId: pid, title, vendor: "Demo vendor", productType: type, cur: { units, gross: net, disc: 0, ret: 0, net, tax: 0, total: net }, prior: null });
+    routes[`${PB_URL}/v1/reports`] = reply({ ok: true, reports: [{ id: dupId, source: "shopify", report_scope: "total_sales_by_product", period_start: "2025-02-01", period_end: "2025-02-28",
+      timezone: "America/Los_Angeles", revision: 1, status: "active", collected_at: "2025-03-01T10:00:00Z", completeness: "complete" }] });
+    routes[`${PB_URL}/v1/reports/${encodeURIComponent(dupId)}/rows?offset=0&limit=500`] = reply({ ok: true, rows: [
+      line("777", "Echeveria", "Succulent", 2, 20),       // online store
+      line("777", "Echeveria", "Succulent", 1, 12.5),     // another channel, same product
+      line(null, "Gift card", "Gift", 1, 25),             // no product id: title + vendor + type
+      line(null, "Gift card", "Gift", 2, 50),
+      line(null, "Gift card", "Card", 1, 5),              // same title and vendor, different type: a different product
+    ] });
+    const r = await pullPlantBreakdown();
+    expect(r.outcome).toBe("done");
+    expect(r.results.find((x: any) => x.report === dupId).outcome).toBe("accepted");
+    const rows = await q(`select p.title, po.revenue::float8 rev, po.units::float8 units, po.channel_scope from product_observations po join products p on p.id = po.product_id
+      where po.status = 'active' and po.period_start = '2025-02-01' and po.import_run_id in (select id from import_runs where source_id = 'pull.plant_breakdown') order by p.title, po.revenue`);
+    expect(rows).toEqual([
+      { title: "Echeveria", rev: 32.5, units: 3, channel_scope: "channel:shopify_report" },
+      { title: "Gift card", rev: 5, units: 1, channel_scope: "channel:shopify_report" },
+      { title: "Gift card", rev: 75, units: 3, channel_scope: "channel:shopify_report" },
+    ]);
+  });
 });
 
 describe("credentials and settings", () => {
