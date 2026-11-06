@@ -32,10 +32,26 @@ const rowSchema = z.object({
 export type PbReport = z.infer<typeof reportSchema>;
 export type PbRow = z.infer<typeof rowSchema>;
 
-/** Maps one saved report to a submission. Channel scope states exactly what the report covers. */
+/** The product's identity in this report: the Shopify product id, else title + vendor + type (the Worker's own fallback). */
+const productKey = (r: PbRow) => r.productId ? `pid:${r.productId}` : `tv:${r.title}|${r.vendor ?? ""}|${r.productType ?? ""}`.slice(0, 120);
+const add = (a: number | null, b: number | null | undefined) => (b == null ? a : (a ?? 0) + b);
+
+/**
+ * Maps one saved report to a submission. Channel scope states exactly what the report covers.
+ * A report can list one product on several rows (one per sales channel, or split lines in the Shopify export). The
+ * dashboard keeps one figure per product, period and scope, so those rows are summed into one product record for the
+ * report's scope; otherwise the second row would collide with the first and the whole report would be refused.
+ */
 export function reportToSubmission(rep: PbReport, rows: PbRow[]) {
   const channel = rep.source === "shopify" ? "channel:shopify_report" : rep.source === "amazon" ? "channel:amazon" : `channel:${rep.source}`;
-  const kept = rows.filter((r) => !isExcludedBrand(r.vendor ?? ""));
+  const merged = new Map<string, { r: PbRow; units: number | null; net: number | null }>();
+  for (const r of rows) {
+    if (isExcludedBrand(r.vendor ?? "")) continue;
+    const k = productKey(r);
+    const m = merged.get(k);
+    if (m) { m.units = add(m.units, r.cur.units); m.net = add(m.net, r.cur.net); }
+    else merged.set(k, { r, units: r.cur.units ?? null, net: r.cur.net ?? null });
+  }
   return {
     schema_version: 1,
     submission_id: `pb:${rep.id}`,                 // Worker report ids include the revision, so a new revision is a new submission
@@ -44,9 +60,9 @@ export function reportToSubmission(rep: PbReport, rows: PbRow[]) {
     collected_at: new Date(rep.collected_at ?? Date.now()).toISOString(),
     completeness: rep.completeness === "complete" ? "complete" : "partial",
     records: {
-      products: kept.map((r) => ({
-        external_id: r.productId ? `pid:${r.productId}` : `tv:${r.title}|${r.vendor ?? ""}`.slice(0, 120), title: r.title, vendor: r.vendor || undefined,
-        category: r.productType || undefined, channel_scope: channel, revenue: r.cur.net ?? null, units: r.cur.units ?? null,
+      products: [...merged.entries()].map(([k, { r, units, net }]) => ({
+        external_id: k, title: r.title, vendor: r.vendor || undefined,
+        category: r.productType || undefined, channel_scope: channel, revenue: net, units,
         cost_state: "missing" as const, gross_profit: null,
       })),
     },
