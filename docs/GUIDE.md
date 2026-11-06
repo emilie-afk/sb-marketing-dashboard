@@ -144,5 +144,5 @@ Not done in this delivery. When approved:
 
 - App: redeploy the previous Netlify deploy (instant rollback in Netlify).
 - Task Tracker pull only: unset `TASK_TRACKER_API_URL` (stops reading; the last copy stays visible), or run `006_task_tracker.down.sql` to remove the copies (the tracker keeps every task).
-- Database: export first (`pg_dump --data-only`), then run the rollback scripts in reverse order: `006_task_tracker.down.sql`, `005_reporting_pulls.down.sql`, `004_sync_jobs.down.sql`, `003_reference_data.down.sql`, `002_planning_tasks_reviews_reports.down.sql`, `001_foundation.down.sql`. Each removes its own `schema_migrations` row. Attachment blobs are not deleted by SQL; delete the `private-attachments` blob store separately if required.
+- Database: export first (`pg_dump --data-only`), then run the rollback scripts in reverse order: `007_campaign_daily_budget.down.sql`, `006_task_tracker.down.sql`, `005_reporting_pulls.down.sql`, `004_sync_jobs.down.sql`, `003_reference_data.down.sql`, `002_planning_tasks_reviews_reports.down.sql`, `001_foundation.down.sql`. Each removes its own `schema_migrations` row. Attachment blobs are not deleted by SQL; delete the `private-attachments` blob store separately if required.
 - Spreadsheets are never written, so no spreadsheet rollback is needed.

@@ -63,6 +63,7 @@ export async function advertising(b: string | null, range: DateRange, includeZer
     `select c.id, c.business_id, c.platform, c.name, c.external_id,
             p.spend::float8 spend, p.acquisitions::float8 acquisitions, p.conversion_value::float8 conversion_value, p.acquisition_event, p.attribution,
             p.reported_cpa::float8 reported_cpa, p.reported_roas::float8 reported_roas,
+            p.daily_budget::float8 daily_budget, p.budget_note,
             to_char(p.period_start,'YYYY-MM-DD') period_start, to_char(p.period_end,'YYYY-MM-DD') period_end, p.timezone,
             (select status from campaign_status_history h where h.campaign_id = c.id order by observed_at desc limit 1) as current_status,
             (select observed_at from campaign_status_history h where h.campaign_id = c.id order by observed_at desc limit 1) as status_observed_at,
@@ -81,6 +82,7 @@ export async function advertising(b: string | null, range: DateRange, includeZer
     const val: Fig = r.conversion_value === null ? missing() : fig(r.conversion_value);
     groups.get(key).campaigns.push({
       id: r.id, name: r.name, status: r.current_status ?? "Unknown", statusObservedAt: r.status_observed_at,
+      dailyBudget: r.daily_budget === null ? missing(r.budget_note ?? undefined) : { ...fig(r.daily_budget), ...(r.budget_note ? { note: r.budget_note } : {}) },
       spend, cpa: r.acquisitions === null && r.reported_cpa !== null ? { state: "value", value: r.reported_cpa, note: "As reported" } : purchaseCpa(spend, acq),
       roas: r.conversion_value === null && r.reported_roas !== null ? { state: "value", value: r.reported_roas, note: "As reported" } : ratio(val, spend),
       acquisitionEvent: r.acquisition_event, attribution: r.attribution, explicitlyIncluded: r.explicitly_included, _acq: acq, _val: val,
