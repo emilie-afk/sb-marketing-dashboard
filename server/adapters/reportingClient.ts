@@ -20,20 +20,40 @@ export function originOf(raw: string | undefined): string | null {
   } catch { return null; }
 }
 
-export async function getJson(origin: string, path: string, headers: Record<string, string>, label: string, onHeaders?: (h: Headers) => void): Promise<any> {
+export type GetJsonOptions = {
+  /** Overall deadline owned by the caller (epoch ms). */
+  deadline?: number;
+  /** Called with the response headers of a successful (2xx) answer, before the body is read. */
+  onHeaders?: (headers: Headers) => void;
+};
+
+/**
+ * GET a JSON document. `deadline` (optional) is an overall deadline owned by the caller: the request's own budget
+ * is the smaller of the per-request limit and the time left, and it covers waiting for headers and reading the
+ * body. Nothing is returned after the budget is spent, even if the transport ignores the abort. Redirects are
+ * never followed and the body is size-limited. `onHeaders` sees only accepted (2xx, non-redirect) responses.
+ */
+export async function getJson(origin: string, path: string, headers: Record<string, string>, label: string, opts: GetJsonOptions = {}): Promise<any> {
+  const { deadline, onHeaders } = opts;
+  const budget = Math.min(CLIENT_LIMITS.timeoutMs, deadline === undefined ? Infinity : deadline - Date.now());
+  if (budget <= 0) throw new HttpError(504, "source_timeout", `${label} ran out of time before the request was sent.`);
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), CLIENT_LIMITS.timeoutMs);
+  const timer = setTimeout(() => ctrl.abort(), budget);
+  const aborted = new Promise<never>((_, reject) => ctrl.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+  aborted.catch(() => {});
   try {
-    const r = await fetchImpl(`${origin}${path}`, { method: "GET", headers: { accept: "application/json", ...headers }, redirect: "manual", signal: ctrl.signal });
+    const r = await Promise.race([fetchImpl(`${origin}${path}`, { method: "GET", headers: { accept: "application/json", ...headers }, redirect: "manual", signal: ctrl.signal }), aborted]);
     if (r.status >= 300 && r.status < 400) { await r.body?.cancel().catch(() => {}); throw new HttpError(502, "source_redirect", `${label} answered with a redirect, which is not followed.`); }
     if (r.status === 401 || r.status === 403) { await r.body?.cancel().catch(() => {}); throw new HttpError(502, "source_auth_failed", `${label} refused the reporting credential.`); }
     if (r.status === 503) { await r.body?.cancel().catch(() => {}); throw new HttpError(502, "source_disabled", `${label} has reporting turned off.`); }
+    if (r.status === 409) { await r.body?.cancel().catch(() => {}); throw new HttpError(502, "source_conflict", `${label} reported that its data changed while it was being read.`); }
     if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new HttpError(502, "source_failed", `${label} returned ${r.status}.`); }
     onHeaders?.(r.headers);
-    const text = await readLimited(r, CLIENT_LIMITS.maxBytes, ctrl.signal, label);
+    const text = await Promise.race([readLimited(r, CLIENT_LIMITS.maxBytes, ctrl.signal, label), aborted]);
+    if (ctrl.signal.aborted) throw new Error("aborted");
     try { return JSON.parse(text); } catch { throw new HttpError(502, "source_bad_response", `${label} did not return JSON.`); }
   } catch (e) {
-    if (ctrl.signal.aborted) throw new HttpError(504, "source_timeout", `${label} did not answer within ${CLIENT_LIMITS.timeoutMs / 1000} seconds.`);
+    if (ctrl.signal.aborted) throw new HttpError(504, "source_timeout", `${label} did not answer in time.`);
     throw e;
   } finally {
     clearTimeout(timer);

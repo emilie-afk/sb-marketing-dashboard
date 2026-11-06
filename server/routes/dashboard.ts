@@ -1,6 +1,7 @@
 import { GP_SCOPE, GP_SCOPE_LABEL, GP_SOURCE_ID } from "../adapters/grossProfit";
 import { CG_SCOPE, CG_SOURCE_ID } from "../adapters/corporateGifting";
 import type { Router } from "../router";
+import { trackerWorkRows } from "../trackerTasks";
 import { query, one } from "../db";
 import { badRequest, notFound } from "../http";
 import { compared, trend, metricDefs } from "../metricQuery";
@@ -115,10 +116,13 @@ export async function promotionsSummary(b: string | null, today: string) {
 }
 
 export async function workSummary(b: string | null, today: string) {
-  const rows = await query<any>(
+  // Dashboard tasks plus read-only Task Tracker records (one-time tasks and occurrences, never whole series).
+  const tracker = await trackerWorkRows(b, today);
+  const own = await query<any>(
     `select t.id, t.title, t.business_id, t.activity, t.owner, t.status, to_char(t.due_date,'YYYY-MM-DD') due_date, t.promotion_id, t.completed_at, t.recurrence
        from tasks t where ($1::text is null or t.business_id = $1) and (t.status <> 'done' or t.completed_at > now() - interval '14 days') and t.status <> 'cancelled'
       order by t.due_date nulls last limit 400`, [b]);
+  const rows = [...own.map((r: any) => ({ ...r, source: "dashboard", read_only: false })), ...tracker];
   const acts = await query<any>(
     `select a.business_id, a.activity_type, a.name, a.count::float8 count, a.count_unit, to_char(a.period_start,'YYYY-MM-DD') period_start, to_char(a.period_end,'YYYY-MM-DD') period_end, a.link
        from activities a where a.status = 'active' and ($1::text is null or a.business_id = $1) and a.period_end >= ($2::date - 35) order by a.period_end desc, a.name limit 60`, [b, today]);

@@ -58,9 +58,23 @@ Loading a page only reads saved data. Nothing on page load triggers Shopify or S
 | Promotions, vendor offers, special collections | dates, offer, code, channels, materials, vendor cost reduction, customer discount, special (BF/CM) terms, collection link | execution status, owner, notes, tasks, files, history |
 | Occasions | name, date, type, note | "selected for use" (creates a promotion) |
 | Sales, profit, ads, listing checks | everything submitted | campaign inclusion, finding decisions, task links, implementation notes |
-| Tasks | n/a | everything. **The dashboard is the editing authority for marketing tasks.** |
+| Tasks created in the dashboard | n/a | everything. **The dashboard is the editing authority for its own marketing tasks.** |
+| Task Tracker tasks | everything (title, brand, owner, dates, status, recurrence). **The Task Tracker is their editing authority.** | nothing: read-only copies, shown with an "Open in Task Tracker" link |
+
+Task Tracker tasks arrive through a one-way pull (see "Task Tracker pull" below) into separate source-owned tables (`tracker_task_records`), never into `tasks`. Every dashboard task mutation (status, comments, occurrences, attachments) answers `403` for them, for every role. Dashboard-created tasks keep their current editing behavior.
 
 Spreadsheet sync is one-way. Precedence when two sheets describe the same promotion: seasonal program over annual calendar; the other sheet's differing values become review items.
+
+### Task Tracker pull
+
+- Settings: `TASK_TRACKER_API_URL` (https origin), `TASK_TRACKER_REPORTING_SECRET` (created on the tracker's Integrations screen; server-only), optional `TASK_TRACKER_INSTANCE_ID` (must match the tracker's) and `TASK_TRACKER_BUSINESSES` (default `sb`). Without them the source shows "not configured" and nothing is read.
+- Runs hourly with the other pulls and from Settings → Data sources → Refresh now (background job).
+- Contract: the tracker's `docs/REPORTING_API.md`. One-time tasks and individual occurrences of recurring tasks are reported; a series is never counted as completed work.
+- Only a complete, validated snapshot is published, in one transaction. A failed, partial, oversized or malformed read, or one where the tracker changed while it was paged (after bounded retries), publishes nothing and keeps the last good copy; the source is marked failing with the reason.
+- One overall deadline (2 minutes) covers every page request, body read and retry, and publication. Every publication statement and lock wait runs with a database timeout equal to the time left, and the deadline is checked again after the last write, immediately before COMMIT; on timeout the whole publication is rolled back. Anything that arrives late is discarded; a late read is recorded as failed, never as success.
+- Reconciliation (contract `schema_version: 2`): the tracker's last page lists every task currently in scope, whatever its dates. Copies of tasks not on that list are hidden, however long ago they were synced (so a dashboard reconnecting after a long gap still drops deleted, unassigned or out-of-scope tasks); occurrences outside their task's date span are hidden; one-time tasks and occurrences inside the snapshot window that are missing are hidden. Other older occurrences stay as history. Removal markers only add the reason. Archived brands that remain mapped stay visible, labelled archived.
+- Ownership: each record carries the person who owned the task on that record's date, so completed work stays credited to its original owner after reassignment or archival.
+- Access: tracker membership grants nothing here (only `TEAM_MEMBERS` does), and a Management role in the tracker does not change dashboard roles.
 
 ## 4. Promotion spreadsheet sync
 
@@ -129,5 +143,6 @@ Not done in this delivery. When approved:
 ## 10. Rollback
 
 - App: redeploy the previous Netlify deploy (instant rollback in Netlify).
-- Database: export first (`pg_dump --data-only`), then run the rollback scripts in reverse order: `004_sync_jobs.down.sql`, `003_reference_data.down.sql`, `002_planning_tasks_reviews_reports.down.sql`, `001_foundation.down.sql`. Each removes its own `schema_migrations` row. Attachment blobs are not deleted by SQL; delete the `private-attachments` blob store separately if required.
+- Task Tracker pull only: unset `TASK_TRACKER_API_URL` (stops reading; the last copy stays visible), or run `006_task_tracker.down.sql` to remove the copies (the tracker keeps every task).
+- Database: export first (`pg_dump --data-only`), then run the rollback scripts in reverse order: `006_task_tracker.down.sql`, `005_reporting_pulls.down.sql`, `004_sync_jobs.down.sql`, `003_reference_data.down.sql`, `002_planning_tasks_reviews_reports.down.sql`, `001_foundation.down.sql`. Each removes its own `schema_migrations` row. Attachment blobs are not deleted by SQL; delete the `private-attachments` blob store separately if required.
 - Spreadsheets are never written, so no spreadsheet rollback is needed.

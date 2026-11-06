@@ -4,7 +4,7 @@ import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 import type { Router } from "../router";
 import { query, one, tx } from "../db";
-import { badRequest, notFound, readJson, HttpError, json } from "../http";
+import { badRequest, notFound, readJson, HttpError, json, forbidden } from "../http";
 import { isIsoDate, formatRange, todayIn, OPERATIONS_TZ } from "../../shared/dates";
 import { businessHeadline, advertising, productsAndVendors } from "./dashboard";
 import { blobStore } from "../blobStore";
@@ -163,6 +163,7 @@ export function registerReports(r: Router) {
     if (!form) throw badRequest("Send the file as multipart form data.");
     const file = form.get("file"), owner_type = String(form.get("owner_type") ?? ""), owner_id = String(form.get("owner_id") ?? "");
     if (!(file instanceof File)) throw badRequest("No file received.");
+    if (owner_id.startsWith("tracker:")) throw forbidden("Task Tracker tasks are read-only here; attach files in the Task Tracker.");
     if (!["report_revision", "task", "promotion"].includes(owner_type) || !/^[0-9a-f-]{36}$/.test(owner_id)) throw badRequest("Unknown attachment owner.");
     const table = owner_type === "report_revision" ? "report_revisions" : owner_type === "task" ? "tasks" : "promotions";
     const owner = await one<any>(`select * from ${table} where id = $1`, [owner_id]);

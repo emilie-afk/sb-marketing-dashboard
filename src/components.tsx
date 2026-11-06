@@ -147,7 +147,7 @@ export function PromotionList({ items, onOpen }: { items: any[]; onOpen?: (id: s
 
 export function WorkBlock({ work }: { work: any }) {
   const T = ({ items, empty }: { items: any[]; empty: string }) => items.length
-    ? <ul className="list">{items.slice(0, 8).map((t: any) => <li key={`${t.id}${t.due_date}`}><b>{t.title}</b><div className="sub">{BUSINESS_NAMES[t.business_id]}{t.owner ? ` · ${t.owner}` : ""}{t.due_date ? ` · due ${t.due_date}` : ""}</div></li>)}</ul>
+    ? <ul className="list">{items.slice(0, 8).map((t: any) => <li key={`${t.id}${t.due_date}`}><b>{t.title}</b>{t.source === "tracker" && <span className="chip muted" style={{ marginLeft: 6 }}>Task Tracker</span>}<div className="sub">{BUSINESS_NAMES[t.business_id]}{t.owner ? ` · ${t.owner}` : ""}{t.due_date ? ` · due ${t.due_date}` : ""}</div></li>)}</ul>
     : <div className="sub">{empty}</div>;
   return (
     <div className="grid g4">

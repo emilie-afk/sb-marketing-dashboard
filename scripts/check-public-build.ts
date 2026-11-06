@@ -12,6 +12,7 @@ const RULES: [string, RegExp][] = [
   ["email address", /\b(?!noreply@anthropic\.com)[\w.+-]+@(?!example\.(test|com)\b)[\w-]+\.[\w.-]+\b/],
   ["connection string", /postgres(ql)?:\/\/[^\s"'`]*@(?!\/)/],
   ["automation token", /\bmkd_[A-Za-z0-9_-]{40,}/],
+  ["Task Tracker reporting secret", /\bttr_[A-Za-z0-9_-]{30,}/],
   ["private key", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   ["Google OAuth secret", /GOCSPX-[A-Za-z0-9_-]{10,}/],
   ["source map", /sourceMappingURL=/],

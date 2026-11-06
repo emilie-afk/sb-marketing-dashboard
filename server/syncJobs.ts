@@ -1,4 +1,4 @@
-// Background sync jobs (spreadsheets and the Plant Revenue Breakdown pull).
+// Background sync jobs (spreadsheets and the reporting pulls: Plant Revenue Breakdown, Gross Profit, Corporate Gifting, Task Tracker).
 //
 // Netlify stops scheduled functions after 30 seconds, and a spreadsheet read may take up to the reader's deadline.
 // So the scheduled function and "Refresh from spreadsheet" only queue a job and start the background function
@@ -16,6 +16,7 @@ import { runSheetSync, dueSources } from "./sheetSync";
 import { pullPlantBreakdown, plantBreakdownConfigured, PB_SOURCE_ID } from "./adapters/plantBreakdown";
 import { pullGrossProfit, grossProfitConfigured, GP_SOURCE_ID } from "./adapters/grossProfit";
 import { pullCorporateGifting, corporateGiftingConfigured, corporateGiftingHeld, CG_SOURCE_ID } from "./adapters/corporateGifting";
+import { pullTaskTracker, taskTrackerConfigured, TT_SOURCE_ID } from "./adapters/taskTracker";
 import { logServerError, redact } from "./redact";
 
 export const JOB_LIMITS = {
@@ -27,12 +28,13 @@ export const BACKGROUND_PATH = "/.netlify/functions/sheet-sync-background";
 const SIG_HEADER = "x-mkd-job-signature";
 const TS_HEADER = "x-mkd-job-timestamp";
 
-export type PullKind = "plant_breakdown" | "gross_profit" | "corporate_gifting";
+export type PullKind = "plant_breakdown" | "gross_profit" | "corporate_gifting" | "task_tracker";
 /** Reporting pulls from the team's other apps (read-only APIs, each with its own credential). */
 export const PULLS: Record<PullKind, { sourceId: string; label: string; configured: () => boolean; held?: () => string | null; run: (actor: string) => Promise<any> }> = {
   plant_breakdown: { sourceId: PB_SOURCE_ID, label: "Plant Revenue Breakdown", configured: plantBreakdownConfigured, run: (a) => pullPlantBreakdown(a) },
   gross_profit: { sourceId: GP_SOURCE_ID, label: "Gross Profit", configured: grossProfitConfigured, run: (a) => pullGrossProfit(a) },
   corporate_gifting: { sourceId: CG_SOURCE_ID, label: "Corporate Gifting", configured: corporateGiftingConfigured, held: corporateGiftingHeld, run: (a) => pullCorporateGifting(a) },
+  task_tracker: { sourceId: TT_SOURCE_ID, label: "Task Tracker", configured: taskTrackerConfigured, run: (a) => pullTaskTracker(a) },
 };
 export const pullKindForSource = (sourceId: string) => (Object.entries(PULLS).find(([, p]) => p.sourceId === sourceId)?.[0] ?? null) as PullKind | null;
 
