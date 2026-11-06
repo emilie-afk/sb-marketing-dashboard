@@ -7,6 +7,7 @@ import { isIsoDate, addDays, todayIn, OPERATIONS_TZ } from "../../shared/dates";
 import { occurrences } from "../../shared/recurrence";
 import { validationErrors } from "../../shared/submission";
 import { audit } from "../audit";
+import { trackerTaskItems, trackerTaskDetail, trackerCalendar, trackerFreshness, isTrackerId, assertDashboardTask } from "../trackerTasks";
 
 const STATUS = z.enum(["todo", "in_progress", "waiting", "done", "cancelled"]);
 const date = z.string().refine(isIsoDate, "must be YYYY-MM-DD");
@@ -71,9 +72,12 @@ export function registerWork(r: Router) {
         return { ...t, due_date: d, status: o?.status ?? "todo", owner: o?.owner ?? t.owner, occurrence: d, series_status: t.status };
       });
     });
-    return { items, window: { from, to }, today };
+    // Read-only copies from the Task Tracker (one-way pull). Edited only in the Task Tracker.
+    const tracker = await trackerTaskItems({ business: b, owner, status, from, to });
+    return { items: [...items.map((t) => ({ ...t, source: t.source ?? "dashboard", read_only: false })), ...tracker], window: { from, to }, today, tracker: await trackerFreshness() };
   });
   r.get("/tasks/:id", async ({ params }) => {
+    if (isTrackerId(params.id)) return trackerTaskDetail(params.id);
     const t = await one<any>("select t.*, to_char(t.due_date,'YYYY-MM-DD') due_date from tasks t where id = $1", [params.id]);
     if (!t) throw notFound("Task");
     return {
@@ -90,6 +94,7 @@ export function registerWork(r: Router) {
     return { id };
   });
   r.patch("/tasks/:id", async ({ req, params, session }) => {
+    assertDashboardTask(params.id);
     const body = await readJson(req);
     const version = Number(body.version);
     const patch = parse(z.object({
@@ -118,6 +123,7 @@ export function registerWork(r: Router) {
     });
   });
   r.patch("/tasks/:id/occurrences/:date", async ({ req, params, session }) => {
+    assertDashboardTask(params.id);
     if (!isIsoDate(params.date)) throw badRequest("Invalid occurrence date");
     const body = parse(z.object({ status: STATUS, owner: z.string().max(120).nullable().optional() }), await readJson(req));
     const t = await one<any>("select recurrence, to_char(due_date,'YYYY-MM-DD') due_date, to_char(recurrence_until,'YYYY-MM-DD') until from tasks where id = $1", [params.id]);
@@ -184,6 +190,7 @@ export function registerWork(r: Router) {
       for (const t of tasks) for (const d of occurrences(t.recurrence, t.due_date, { start: from, end: to }, t.until))
         items.push({ type: "task", id: t.id, business: t.business_id, title: t.title, start: d, end: d, status: t.recurrence ? undefined : t.status, occurrence: t.recurrence ? d : null });
     }
+    if (types.includes("task")) items.push(...(await trackerCalendar(from, to, b)));
     items.sort((a, b2) => (a.start < b2.start ? -1 : a.start > b2.start ? 1 : a.type.localeCompare(b2.type)));
     return { items, from, to, timezoneNote: "Promotion dates follow the spreadsheet (Pacific time for offers). Task deadlines use Vietnam time." };
   });

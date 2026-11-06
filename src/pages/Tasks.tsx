@@ -11,6 +11,7 @@ export function TasksPage({ role }: { role: string }) {
   const [creating, setCreating] = useState(false);
   const s = useApi<any>(`/tasks?${business ? `business=${business}&` : ""}${owner ? `owner=${encodeURIComponent(owner)}` : ""}`, [business, owner]);
   const setStatus = async (t: any, status: string) => {
+    if (t.read_only) return;
     try {
       if (t.occurrence) await api(`/tasks/${t.id}/occurrences/${t.occurrence}`, { method: "PATCH", json: { status } });
       else await api(`/tasks/${t.id}`, { method: "PATCH", json: { status, version: t.version } });
@@ -24,27 +25,29 @@ export function TasksPage({ role }: { role: string }) {
         <label>Business <select value={business} onChange={(e) => setBusiness(e.target.value)}><option value="">All</option>{Object.entries(BUSINESS_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         <label>Owner <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="Any" /></label>
         <span className="spacer" />{role !== "viewer" && <button className="btn primary small" onClick={() => setCreating(true)}>New task</button>}
-        <span className="sub">This dashboard is where marketing tasks are edited. Deadlines use Vietnam time.</span>
+        <span className="sub">Dashboard tasks are edited here. Task Tracker tasks are read-only copies; open them in the Task Tracker to change them. Deadlines use Vietnam time.</span>
       </div>
       <Async s={s}>{(d) => {
         const items = d.items.filter((t: any) => t.status !== "cancelled");
-        return view === "list" ? (
+        const tr = d.tracker;
+        const freshness = tr && tr.status !== "not_configured" ? <p className={`sub ${tr.status === "failing" ? "bad" : ""}`}>Task Tracker copy: {tr.last_success_at ? `last updated ${when(tr.last_success_at)}` : "not read yet"}{tr.status === "failing" ? ` · the latest read failed, showing the last good copy` : ""}.</p> : null;
+        return <>{freshness}{view === "list" ? (
           <div className="table-wrap"><table>
             <thead><tr><th>Task name</th><th>Business</th><th>Activity</th><th>Owner</th><th>Status</th><th>Due date</th><th>Related promotion</th></tr></thead>
             <tbody>{items.map((t: any) => <tr key={`${t.id}${t.occurrence ?? ""}`} className="clickable" onClick={() => setOpen(t.id)}>
-              <td><b>{t.title}</b>{t.recurrence && <span className="chip muted" style={{ marginLeft: 6 }}>repeats</span>}{t.file_count > 0 && <span className="sub"> · {t.file_count} file(s)</span>}</td>
+              <td><b>{t.title}</b>{t.read_only && <span className="chip muted" style={{ marginLeft: 6 }}>Task Tracker</span>}{t.recurrence && <span className="chip muted" style={{ marginLeft: 6 }}>repeats</span>}{t.file_count > 0 && <span className="sub"> · {t.file_count} file(s)</span>}</td>
               <td>{BUSINESS_NAMES[t.business_id]}</td><td>{t.activity}</td><td>{t.owner ?? "Unassigned"}</td>
-              <td onClick={(e) => e.stopPropagation()}>{role === "viewer" ? t.status : <select value={t.status} onChange={(e) => setStatus(t, e.target.value)}>{[...STATUSES, ["cancelled", "Cancelled"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>}</td>
+              <td onClick={(e) => e.stopPropagation()}>{role === "viewer" || t.read_only ? t.status : <select value={t.status} onChange={(e) => setStatus(t, e.target.value)}>{[...STATUSES, ["cancelled", "Cancelled"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>}</td>
               <td className={t.status !== "done" && t.due_date && t.due_date < d.today ? "bad" : ""}>{t.due_date ?? "Not set"}</td><td>{t.promotion_title ?? ""}</td></tr>)}</tbody>
           </table></div>
         ) : (
           <div className="board">{STATUSES.map(([k, l]) => <div key={k} className="col"><h4>{l}</h4>
             {items.filter((t: any) => t.status === k).map((t: any) => <div key={`${t.id}${t.occurrence ?? ""}`} className="tcard" onClick={() => setOpen(t.id)}>
               <b>{t.title}</b><div className="sub">{BUSINESS_NAMES[t.business_id]} · {t.owner ?? "Unassigned"}{t.due_date ? ` · ${t.due_date}` : ""}</div>
-              {role !== "viewer" && <div className="row" style={{ marginTop: 4 }} onClick={(e) => e.stopPropagation()}>{STATUSES.filter(([x]) => x !== k).map(([x, xl]) => <button key={x} className="btn small" onClick={() => setStatus(t, x)}>{xl}</button>)}</div>}
+              {role !== "viewer" && !t.read_only && <div className="row" style={{ marginTop: 4 }} onClick={(e) => e.stopPropagation()}>{STATUSES.filter(([x]) => x !== k).map(([x, xl]) => <button key={x} className="btn small" onClick={() => setStatus(t, x)}>{xl}</button>)}</div>}
             </div>)}</div>)}</div>
-        ); }}</Async>
-      {open && <TaskDrawer id={open} role={role} onClose={() => { setOpen(null); s.reload(); }} />}
+        )}</>; }}</Async>
+      {open && <TaskDrawer key={open} id={open} role={role} onClose={() => { setOpen(null); s.reload(); }} />}
       {creating && <NewTask onClose={() => { setCreating(false); s.reload(); }} />}
     </div>
   );
@@ -72,8 +75,16 @@ function NewTask({ onClose }: { onClose: () => void }) {
 }
 
 function TaskDrawer({ id, role, onClose }: { id: string; role: string; onClose: () => void }) {
-  const s = useApi<any>(`/tasks/${id}`, [id]);
+  const s = useApi<any>(`/tasks/${encodeURIComponent(id)}`, [id]);
   const [comment, setComment] = useState("");
+  if (id.startsWith("tracker:")) return <Drawer onClose={onClose}><Async s={s}>{(d) => <>
+    <h2>{d.task.title}</h2>
+    <p className="sub">From the Task Tracker. Read-only here; the Task Tracker is where this task is edited.</p>
+    <dl className="kv"><dt>Business</dt><dd>{BUSINESS_NAMES[d.task.business_id]}</dd><dt>Brand</dt><dd>{d.task.brand_name}{d.task.brand_archived ? " (archived)" : ""}</dd>
+      <dt>Owner</dt><dd>{d.task.owner}{d.task.owner_archived ? " (archived)" : ""}</dd><dt>Status</dt><dd>{d.task.status === "done" ? "Done" : "Open"}</dd>
+      <dt>Due</dt><dd>{d.task.due_date ?? "Not set"}{d.task.recurrence ? ` (one occurrence of a ${d.task.recurrence} task)` : ""}</dd><dt>Synced</dt><dd>{when(d.task.synced_at)}</dd></dl>
+    {typeof d.task.open_url === "string" && d.task.open_url.startsWith("https://") && <a className="btn primary small" href={d.task.open_url} target="_blank" rel="noopener noreferrer">Open in Task Tracker</a>}
+  </>}</Async></Drawer>;
   return <Drawer onClose={onClose}><Async s={s}>{(d) => <>
     <h2>{d.task.title}</h2>
     <dl className="kv"><dt>Business</dt><dd>{BUSINESS_NAMES[d.task.business_id]}</dd><dt>Owner</dt><dd>{d.task.owner ?? "Unassigned"}</dd><dt>Status</dt><dd>{d.task.status}</dd>

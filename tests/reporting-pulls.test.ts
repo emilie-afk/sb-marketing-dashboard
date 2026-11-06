@@ -104,7 +104,7 @@ describe("Gross Profit", () => {
   it("a stalled source times out", async () => {
     const saved = CLIENT_LIMITS.timeoutMs; CLIENT_LIMITS.timeoutMs = 50;
     _setReportingFetchForTests(((_u: any, init: any) => new Promise((_r, rej) => init.signal.addEventListener("abort", () => rej(new Error("aborted"))))) as any);
-    try { expect((await pullGrossProfit()).problems[0]).toMatch(/did not answer within/); } finally { CLIENT_LIMITS.timeoutMs = saved; }
+    try { expect((await pullGrossProfit()).problems[0]).toMatch(/did not answer in time/); } finally { CLIENT_LIMITS.timeoutMs = saved; }
   });
   it("an unexpected record is rejected, not imported", async () => {
     routes[`${GP_URL}/v1/reporting/weeks?limit=52`] = reply({ ok: true, schema_version: 1, weeks: [{ id: "x", revision: "one" }], next_cursor: null });
@@ -233,7 +233,7 @@ describe("job flow", () => {
   it("Content Intelligence stays inactive", async () => {
     expect((await q("select status from source_connections where id = 'blocked.content_intelligence'"))[0].status).toBe("blocked");
     const s = (await call("viewer", "GET", "/settings")).body;
-    expect(s.pulls.map((p: any) => p.kind).sort()).toEqual(["corporate_gifting", "gross_profit", "plant_breakdown"]);
+    expect(s.pulls.map((p: any) => p.kind).sort()).toEqual(["corporate_gifting", "gross_profit", "plant_breakdown", "task_tracker"]);
     expect(s.sources.some((x: any) => x.id === "blocked.gross_profit" || x.id === "blocked.corporate_gifting")).toBe(false);
   });
 });

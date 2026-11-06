@@ -55,8 +55,8 @@ export async function pullCheck(req: Request): Promise<Response> {
   const key_id = keyId(probe.key()!);
   let result = "ok", slots: string[] = [];
   try {
-    const out = await getJson(probe.origin()!, probe.path, probe.headers(), probe.label, (h) => {
-      slots = (h.get("x-reporting-key-slot") ?? "").split(",").filter((s) => s === "1" || s === "2");
+    const out = await getJson(probe.origin()!, probe.path, probe.headers(), probe.label, {
+      onHeaders: (h) => { slots = (h.get("x-reporting-key-slot") ?? "").split(",").filter((s) => s === "1" || s === "2"); },
     });
     if (!out || typeof out !== "object") result = "unexpected_response";
   } catch (e) {

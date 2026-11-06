@@ -25,7 +25,7 @@ export function CalendarPage() {
   const s = useApi<any>(`/calendar?from=${from}&to=${to}&types=${types.join(",")}${business ? `&business=${business}` : ""}`, [from, to, types, business]);
   const step = (n: number) => setAnchor(view === "month" ? `${addMonthsStr(month, n)}-01` : addDays(anchor, n * (view === "week" ? 7 : 30)));
   const title = view === "month" ? new Date(`${month}-01T00:00:00Z`).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }) : range({ start: from, end: to });
-  const openItem = (it: any) => { if (it.type === "promotion" || it.type === "launch" || it.type === "deadline") setOpen(it.id); else if (it.type === "task") location.hash = "#/tasks"; };
+  const openItem = (it: any) => { if (it.type === "promotion" || it.type === "launch" || it.type === "deadline") setOpen(it.id); else if (it.type === "task" && it.source === "tracker" && typeof it.open_url === "string" && it.open_url.startsWith("https://")) window.open(it.open_url, "_blank", "noopener,noreferrer"); else if (it.type === "task") location.hash = "#/tasks"; };
   return (
     <div>
       <Tabs tabs={[["month", "Month"], ["week", "Week"], ["list", "List"]]} value={view} onChange={setView} />
