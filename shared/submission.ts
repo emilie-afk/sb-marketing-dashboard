@@ -58,7 +58,7 @@ export const productRowSchema = z.object({
   url: url.optional(),
   channel_scope: z.string().regex(/^[a-z0-9_:,.-]{2,120}$/),
   revenue: money.nullable(),
-  units: nonNeg.nullable(),
+  units: z.number().finite().nullable(),       // net units: negative when returns exceed sales in the period, like revenue
   orders: nonNeg.nullable().optional(),
   gross_profit: money.nullable().optional(),     // null when cost is missing; never send 0 for unknown cost
   cost_state: z.enum(["complete", "partial", "missing", "not_applicable"]).default("missing"),

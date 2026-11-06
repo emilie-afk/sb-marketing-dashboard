@@ -23,9 +23,14 @@ export async function applyPulled(body: any, family: string, who: PullIdentity, 
        and status = 'active' and left(submission_id, length($5)) = $5 order by revision desc limit 1`,
     [who.sourceId, who.submitter, body.business, who.submissionSource, family]))[0];
   // Same revision already active. If it was stored with rejected records, say so every time: an incomplete revision
-  // is never reported as unchanged and healthy.
+  // is never reported as unchanged and healthy. If the dashboard's rules now accept more of it (fewer rejected
+  // records), it is re-imported as a correction of itself; otherwise nothing is written, so this never loops.
   if (active && baseOf(active.submission_id) === base) {
-    return { outcome: "unchanged" as const, submission_id: active.submission_id, stored_with_rejected: Number(active.rejected_count) };
+    const stored = Number(active.rejected_count);
+    const now = stored > 0 ? checkSubmission({ ...body }) : null;
+    if (!now || !now.ok || now.value.rejected.length >= stored) {
+      return { outcome: "unchanged" as const, submission_id: active.submission_id, stored_with_rejected: stored };
+    }
   }
 
   const used = new Set((await query<{ submission_id: string }>(
