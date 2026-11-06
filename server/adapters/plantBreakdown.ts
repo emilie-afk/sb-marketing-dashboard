@@ -91,7 +91,9 @@ export async function pullPlantBreakdown(actor = PB_SUBMITTER) {
     const active = await query<{ submission_id: string; rejected_count: number }>(
       `select submission_id, rejected_count from import_runs where source_id = $1 and submitter = $2 and business_id = 'sb' and submission_source = 'plant_breakdown'
          and status = 'active' and left(submission_id, length($3)) = $3 order by revision desc limit 1`, [PB_SOURCE_ID, PB_SUBMITTER, family]);
-    if (active[0] && active[0].submission_id.replace(/:c\d+$/, "") === `pb:${rep.id}`) {
+    // Already current and stored complete: no need to read its rows again. (Stored with rejected rows: read again, in
+    // case the dashboard now accepts them; applyPulled re-imports only if fewer rows would be rejected.)
+    if (active[0] && active[0].submission_id.replace(/:c\d+$/, "") === `pb:${rep.id}` && Number(active[0].rejected_count) === 0) {
       // Already current; if it was stored with rejected rows, keep saying so.
       results.push({ report: rep.id, outcome: "unchanged", submission_id: active[0].submission_id, stored_with_rejected: Number(active[0].rejected_count) });
       continue;
