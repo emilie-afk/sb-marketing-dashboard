@@ -120,6 +120,26 @@ describe("advertising", () => {
     g = r.body.platforms.find((p: any) => p.platform === "google");
     expect(g.campaigns.find((c: any) => c.name === "B")).toMatchObject({ explicitlyIncluded: true, status: "Active" });
   });
+  it("keeps each campaign's daily budget, with its note, and leaves it missing when none was sent", async () => {
+    const wk = { start: "2025-11-01", end: "2025-11-07" };
+    await submit({ ...envelope("ads-budget-1", "sb", wk), source: "ads", records: { campaigns: [
+      { platform: "facebook", external_id: "fb-1", name: "Adset budgets", spend: 50, acquisitions: 2, conversion_value: 90, daily_budget: 25, budget_note: "Sum of ad set budgets" },
+      { platform: "facebook", external_id: "fb-2", name: "Lifetime", spend: 20, acquisitions: 1, conversion_value: 30, budget_note: "Lifetime budget" },
+      { platform: "google", external_id: "g-1", name: "Plain", spend: 70, acquisitions: 3, conversion_value: 210, daily_budget: 10 },
+      { platform: "google", external_id: "g-2", name: "No budget sent", spend: 5, acquisitions: 0, conversion_value: 0 },
+    ] } });
+    // A negative budget rejects that campaign row; nothing is stored for it.
+    await submit({ ...envelope("ads-budget-2", "sb", wk), source: "ads", records: { campaigns: [
+      { platform: "google", external_id: "g-3", name: "Negative", spend: 5, daily_budget: -1 }] } });
+    expect((await q("select count(*)::int n from ad_campaigns where external_id = 'g-3'"))[0].n).toBe(0);
+    const r = await call("viewer", "GET", `/business/sb/advertising?start=${wk.start}&end=${wk.end}`);
+    const all = r.body.platforms.flatMap((p: any) => p.campaigns);
+    const by = (n: string) => all.find((c: any) => c.name === n).dailyBudget;
+    expect(by("Adset budgets")).toMatchObject({ state: "value", value: 25, note: "Sum of ad set budgets" });
+    expect(by("Lifetime")).toMatchObject({ state: "missing", note: "Lifetime budget" });
+    expect(by("Plain")).toMatchObject({ state: "value", value: 10 });
+    expect(by("No budget sent").state).toBe("missing");
+  });
 });
 
 describe("products and vendors", () => {
@@ -278,12 +298,17 @@ describe("listing reviews", () => {
       { name: "Submissions", rows: [["submission_id", "business", "source", "period_start", "period_end", "granularity", "timezone", "collected_at", "completeness"],
         ["wr-2026-10-30", "sb", "weekly_report", "2026-10-03", "2026-10-09", "week", "America/Los_Angeles", "2026-11-02T08:00:00Z", "complete"]] },
       { name: "Activities", rows: [["submission_id", "type", "name", "count", "count_unit"], ["wr-2026-10-30", "social", "Social posts", 5, "social posts per channel"]] },
+      { name: "Campaigns", rows: [["submission_id", "platform", "external_id", "name", "status", "status_observed_at", "spend", "acquisitions", "acquisition_event", "conversion_value", "attribution", "reported_cpa", "reported_roas", "daily_budget", "budget_note"],
+        ["wr-2026-10-30", "google", "Shopping", "Shopping", "Active", "2026-11-02T08:00:00Z", "120.5", "3", "purchase", "300", "Google: web purchase", "", "", "40", ""],
+        ["wr-2026-10-30", "facebook", "Lifetime", "Lifetime", "Inactive", "2026-11-02T08:00:00Z", "20", "", "purchase", "", "Meta: Purchases", "", "", "", "Lifetime budget"]] },
     ]);
     expect(subs.map((s) => s.body.submission_id)).toEqual(["listing-check:sheet-run-1", "wr-2026-10-30"]);
     for (const s of subs) expect((await submit(s.body, "sheet.intake")).outcome).toBe("accepted");
     // Activity counts never create completed tasks.
     expect((await q("select count(*)::int n from tasks where title ilike '%social posts%'"))[0].n).toBe(0);
     expect((await q("select count_unit from activities where name = 'Social posts'"))[0].count_unit).toBe("social posts per channel");
+    expect(await q("select c.name, p.daily_budget::float8 b, p.budget_note from campaign_performance p join ad_campaigns c on c.id = p.campaign_id where c.external_id in ('Shopping', 'Lifetime') order by c.name"))
+      .toEqual([{ name: "Lifetime", b: null, budget_note: "Lifetime budget" }, { name: "Shopping", b: 40, budget_note: null }]);
   });
 });
 

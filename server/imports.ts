@@ -130,10 +130,10 @@ async function writeRecords(c: pg.PoolClient, sub: CheckedSubmission, runId: str
     if (k.status) await c.query("insert into campaign_status_history (campaign_id, status, observed_at, import_run_id) values ($1,$2,$3,$4)", [camp.id, k.status, k.status_observed_at, runId]);
     await c.query(
       `insert into campaign_performance (campaign_id, import_run_id, period_start, period_end, granularity, timezone, spend, acquisitions,
-         acquisition_event, conversion_value, attribution, reported_cpa, reported_roas)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+         acquisition_event, conversion_value, attribution, reported_cpa, reported_roas, daily_budget, budget_note)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [camp.id, runId, p.start, p.end, p.granularity, p.timezone, k.spend, k.acquisitions ?? null, k.acquisition_event, k.conversion_value ?? null,
-        k.attribution ?? null, k.reported_cpa ?? null, k.reported_roas ?? null]);
+        k.attribution ?? null, k.reported_cpa ?? null, k.reported_roas ?? null, k.daily_budget ?? null, k.budget_note ?? null]);
   }
   for (const a of sub.accepted.activities) {
     await c.query(
