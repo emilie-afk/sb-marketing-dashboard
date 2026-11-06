@@ -403,6 +403,38 @@ describe("review regressions, round 3", () => {
     expect((await q("select status from source_connections where id = 'pull.plant_breakdown'"))[0].status).toBe("failing");
   });
 
+  it("net units below zero (returns exceeding sales) are kept, like negative revenue", async () => {
+    await clearJobs();
+    const id3 = "shopify:total_sales_by_product:2025-05-01:2025-05-31:r1";
+    routes[`${PB_URL}/v1/reports`] = reply({ ok: true, reports: [pbReport(id3)] });
+    routes[`${PB_URL}/v1/reports/${encodeURIComponent(id3)}/rows?offset=0&limit=500`] = reply({ ok: true, rows: [
+      goodRow, { productId: "2003", title: "Returned plant", vendor: "Demo vendor", productType: "Succulent", cur: { units: -2, net: -18.5 } }] });
+    const j = await refresh("pull.plant_breakdown");
+    expect(j.status).toBe("succeeded");
+    const back = await q(`select po.units::float8 units, po.revenue::float8 rev from product_observations po join products p on p.id = po.product_id
+      where p.title = 'Returned plant' and po.status = 'active'`);
+    expect(back).toEqual([{ units: -2, rev: -18.5 }]);
+  });
+
+  it("a revision stored with rejected rows is re-imported once the rules accept more of it, and never loops", async () => {
+    await clearJobs();
+    const id4 = "shopify:total_sales_by_product:2025-04-01:2025-04-30:r1";
+    routes[`${PB_URL}/v1/reports`] = reply({ ok: true, reports: [pbReport(id4)] });
+    routes[`${PB_URL}/v1/reports/${encodeURIComponent(id4)}/rows?offset=0&limit=500`] = reply({ ok: true, rows: [goodRow, badRow] });
+    expect((await refresh("pull.plant_breakdown")).status).toBe("partial");                  // 1 row rejected (blank title)
+    // Pretend an older rule had rejected one more row than today's rules do.
+    await q("update import_runs set rejected_count = 2 where submission_id = $1 and status = 'active'", [`pb:${id4}`]);
+    const fixed = await refresh("pull.plant_breakdown");
+    expect(fixed.result.results[0].outcome).toBe("accepted");                                    // re-imported as a correction
+    const active = await q("select submission_id, rejected_count, corrects_submission_id from import_runs where submission_id like $1 and status = 'active'", [`pb:${id4}%`]);
+    expect(active).toEqual([{ submission_id: `pb:${id4}:c2`, rejected_count: 1, corrects_submission_id: `pb:${id4}` }]);
+    // Same rules again: nothing written, still reported as incomplete, never healthy.
+    const again = await refresh("pull.plant_breakdown");
+    expect(again.result.results[0]).toMatchObject({ outcome: "unchanged", stored_with_rejected: 1 });
+    expect(again.status).toBe("partial");
+    expect((await q("select count(*)::int n from import_runs where submission_id like $1 and outcome = 'accepted'", [`pb:${id4}%`]))[0].n).toBe(2);
+  });
+
   it("B2. a record with every row rejected (0 accepted, 1 rejected) is not counted as success", async () => {
     await clearJobs();
     const id2 = "shopify:total_sales_by_product:2026-07-01:2026-07-31:r1";
