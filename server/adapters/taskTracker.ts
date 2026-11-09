@@ -22,7 +22,7 @@
 //   keyed by (source instance, record id), so retries are idempotent.
 import { z } from "zod";
 import type pg from "pg";
-import { getPool } from "../db";
+import { beginTransaction } from "../db";
 import { HttpError } from "../http";
 import { originOf, getJson } from "./reportingClient";
 
@@ -160,7 +160,8 @@ type Bounded = { query: (text: string, params?: unknown[]) => Promise<pg.QueryRe
  * is reported.
  */
 async function boundedTransaction<T>(deadline: number, fn: (c: Bounded) => Promise<T>): Promise<T> {
-  const client = await getPool().connect();
+  // Retries once if the pooled connection was closed while idle, but never starts an attempt after the deadline.
+  const client = await beginTransaction("begin", { deadline, expired: timeout });
   const remaining = () => Math.floor(deadline - Date.now());
   const bound = async () => {
     const ms = remaining();
@@ -170,7 +171,6 @@ async function boundedTransaction<T>(deadline: number, fn: (c: Bounded) => Promi
   const c: Bounded = { query: async (text, params = []) => { await bound(); return client.query(text, params as any[]); } };
   let done = false;
   try {
-    await client.query("begin");
     const out = await fn(c);
     if (remaining() <= 0) throw timeout();            // after the final write, immediately before COMMIT
     await client.query("commit");
