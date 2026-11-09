@@ -174,6 +174,14 @@ describe("dashboard views", () => {
     await q(`insert into tracker_task_records (source_instance, record_id, task_id, kind, business_id, title, task_type, brand_name, assignee_name, status, due_date, snapshot_id)
              values ('tracker-test', $1, $2, 'task', 'sb', '<img src=x onerror=alert(1)>', 'adhoc', 'Alpha Plants', 'Sam Staff', 'open', current_date + 2, $3)`, [`task:${T1}`, T1, `snp_${"a".repeat(32)}`]);
   });
+  it("Settings lists one Task Tracker source, and its Data collected time is the latest published snapshot", async () => {
+    const s = (await call("viewer", "GET", "/settings")).body;
+    const rows = s.sources.filter((x: any) => x.label === "Task Tracker");
+    expect(rows.map((x: any) => x.id)).toEqual(["pull.task_tracker"]);
+    const latest = (await q("select max(generated_at) at from tracker_snapshots"))[0].at;
+    expect(latest).not.toBeNull();
+    expect(new Date(rows[0].last_collected).getTime()).toBe(new Date(latest).getTime());
+  });
   it("lists tracker tasks read-only with an Open in Task Tracker link built from the configured origin", async () => {
     const r = await call("viewer", "GET", "/tasks");
     const tr = r.body.items.filter((t: any) => t.source === "tracker");
