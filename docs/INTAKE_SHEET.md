@@ -35,9 +35,11 @@ Rules the import enforces:
 |---|---|---|
 | Submissions | one submission (envelope) | submission_id, business (`sb` / `p2s` / `perksradar`), source, period_start, period_end, granularity (`day` / `week` / `month` / `custom`), timezone, collected_at, completeness (`complete` / `partial` / `provisional` / `incomplete`), corrects |
 | Metrics | one figure | submission_id, metric, scope, scope_label, value, state, attribution |
-| Campaigns | one campaign's period result | submission_id, platform (`google` / `facebook` / `amazon` / `etsy` / ...), external_id, name, status, status_observed_at, spend, acquisitions, acquisition_event, conversion_value, attribution, reported_cpa, reported_roas |
+| Campaigns | one campaign's period result | submission_id, platform (`google` / `facebook` / `amazon` / `etsy` / ...), external_id, name, status, status_observed_at, spend, acquisitions, acquisition_event, conversion_value, attribution, reported_cpa, reported_roas, daily_budget, budget_note |
 | Activities | one named activity | submission_id, type (`content`, `social`, `pitching`, `vendor`, `ai_tool`, `outreach`, `listing`, `other`), name, count, count_unit, link |
 | Products | one product's period sales | submission_id, external_id, title, vendor, category, genus, url, channel_scope, revenue, units, orders, gross_profit, cost_state |
+
+Campaign `daily_budget` is the daily budget as it was when the result was collected (a setting, not a period total). Leave it empty when the campaign has no daily budget, for example a lifetime budget, and say why in `budget_note`; use `budget_note` too when the figure was derived, for example "Sum of ad set budgets".
 
 Metric keys: `revenue`, `orders`, `units`, `sessions`, `sessions_added_to_cart`, `sessions_reached_checkout`, `sessions_converted`, `bot_sessions`, `human_sessions`, `ad_spend`, `ad_purchases`, `ad_purchase_value`, `gross_profit`, `product_cost`, `shipping_cost`, `gross_profit_revenue_basis` (always in the same submission as `gross_profit`, for the same scope and period: the revenue the profit was calculated on; used only for gross margin; a basis in a separate submission is ignored, and a correction must send both), `signups`, `cards_added`, `reminders_sent`, `emails_delivered`, `emails_opened`, `emails_clicked`. Send counts, not rates: the dashboard computes AOV, conversion rates, CPA, ROAS and margin from them.
 

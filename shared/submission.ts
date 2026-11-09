@@ -39,6 +39,8 @@ export const campaignSchema = z.object({
   attribution: z.string().max(120).optional(),
   reported_cpa: money.nullable().optional(),
   reported_roas: money.nullable().optional(),
+  daily_budget: nonNeg.nullable().optional(),       // daily budget as observed at collection time
+  budget_note: z.string().max(120).optional(),
 }).refine((c) => !c.status || c.status_observed_at, { message: "status needs status_observed_at" });
 
 export const activitySchema = z.object({

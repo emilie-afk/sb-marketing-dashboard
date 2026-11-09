@@ -113,10 +113,11 @@ export function AdvertisingBlock({ platforms, showBusiness = true }: { platforms
               <summary>{PLATFORM_NAMES[p.platform] ?? p.platform}: {p.campaigns.length} campaign{p.campaigns.length === 1 ? "" : "s"}</summary>
               <div className="table-wrap" style={{ margin: "8px 0 12px" }}>
                 <table>
-                  <thead><tr><th>Campaign name</th><th>Status</th><th className="n">Cost</th><th className="n">CPA</th><th className="n">ROAS</th></tr></thead>
+                  <thead><tr><th>Campaign name</th><th>Status</th><th className="n">Budget/day</th><th className="n">Cost</th><th className="n">CPA</th><th className="n">ROAS</th></tr></thead>
                   <tbody>{p.campaigns.map((c: any) => (
                     <tr key={c.id}><td>{c.name}{c.explicitlyIncluded && <span className="chip warn" style={{ marginLeft: 6 }}>New, shown with zero spend</span>}</td>
                       <td><span className={`chip ${c.status === "Active" ? "" : "muted"}`}>{c.status}</span><div className="sub">as of {when(c.statusObservedAt)}</div></td>
+                      <td className="n">{fmt(c.dailyBudget, "currency")}{c.dailyBudget?.note && <div className="sub">{c.dailyBudget.note}</div>}</td>
                       <td className="n">{fmt(c.spend, "currency")}</td><td className="n">{fmt(c.cpa, "currency")}</td><td className="n">{fmt(c.roas, "multiple")}</td></tr>))}
                   </tbody>
                 </table>
