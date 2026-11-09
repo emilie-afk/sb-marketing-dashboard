@@ -45,7 +45,9 @@ export async function defaultRange(): Promise<DateRange | null> {
 export async function sourceStatus() {
   const rows = await query(
     `select id, label, business_id, kind, status, blocked_reason, last_success_at, last_failure_at, last_error,
-            (select max(collected_at) from import_runs r where r.source_id = s.id and r.outcome = 'accepted') as last_collected
+            coalesce((select max(collected_at) from import_runs r where r.source_id = s.id and r.outcome = 'accepted'),
+                     -- Task Tracker data is published as snapshots, not import runs.
+                     case when s.id = 'pull.task_tracker' then (select max(generated_at) from tracker_snapshots) end) as last_collected
        from source_connections s order by label`);
   const sheets = await query("select id, label, role, business_id, year, last_success_at, last_attempt_at, last_error, active from sheet_sources order by year desc nulls last, label");
   const stale = rows.filter((r: any) => r.status === "failing" || (r.status === "ok" && r.last_success_at && Date.now() - new Date(r.last_success_at).getTime() > 8 * 86400_000));
