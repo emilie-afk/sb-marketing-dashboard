@@ -1,6 +1,7 @@
 // Gift occasions on the Calendar: occasion details, linking promotions, and the promotion form used to create a
 // dashboard promotion or edit one's dashboard-owned fields. Occasions give context; the campaign dates are the user's.
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { campaignYear, defaultOccurrenceYear } from "../../shared/giftCalendar";
 import { useApi, Async, Drawer, api, range, BUSINESS_NAMES } from "../lib";
 
 const GIFT_BRANDS = ["sb", "p2s"];
@@ -8,29 +9,32 @@ const STATUSES = ["planned", "preparing", "ready", "launched", "ended", "cancell
 export type Role = "viewer" | "editor" | "admin";
 const brandList = (ids: string[]) => ids.map((b) => BUSINESS_NAMES[b] ?? b).join(" and ");
 
-/** The occurrence year a campaign starting on `start` most likely leads into (a December campaign can lead into next year). */
-export function defaultYear(o: any, start: string | null | undefined, fallback: number) {
-  if (!o || o.kind !== "dated" || !o.ranges) return null;
-  const years = Object.keys(o.ranges).map(Number).sort();
-  if (start) for (const y of years) { const r = o.ranges[y]; const end = r ? r.end : `${y}-12-31`; if (end >= start) return y; }
-  return fallback;
-}
-
-export function GiftOccasionPicker({ value, year, onChange, business, start, disabled }: {
+export function GiftOccasionPicker({ value, year, onChange, business, start, disabled, yearChosen = false }: {
   value: string | null; year: number | null; business: string; start?: string | null; disabled?: boolean;
+  /** True when the year was set deliberately (an existing link, or the occasion the form was opened from): keep it. */
+  yearChosen?: boolean;
   onChange: (v: { id: string | null; year: number | null }) => void;
 }) {
-  const ref = Number((start ?? new Date().toISOString()).slice(0, 4));
+  const ref = campaignYear(start);
   const s = useApi<any[]>(`/gift-occasions?year=${ref}`, [ref]);
+  const [explicit, setExplicit] = useState(yearChosen && year != null);
   const list = (s.data ?? []).filter((o) => o.brands.includes(business));
   const sel = list.find((o) => o.id === value);
+  // Until someone picks a year, keep the default in step with the campaign start (entered before or after the occasion).
+  useEffect(() => {
+    if (!sel || sel.kind !== "dated" || explicit) return;
+    const y = defaultOccurrenceYear(sel.ranges, start, ref);
+    if (y !== year) onChange({ id: sel.id, year: y });
+  }, [sel?.id, start, ref, explicit, s.data]);
   const dated = list.filter((o) => o.kind === "dated"), yr = list.filter((o) => o.kind === "year_round");
   const cats = [...new Set(yr.map((o) => o.category))];
+  const years = sel?.kind === "dated" ? [...new Set([...Object.keys(sel.dates).map(Number), ...(year ? [year] : [])])].sort((a, b) => a - b) : [];
   return <div className="row" style={{ alignItems: "flex-start" }}>
     <label style={{ display: "grid", gap: 2 }}>Gift occasion
       <select aria-label="Gift occasion" disabled={disabled} value={value ?? ""} onChange={(e) => {
         const id = e.target.value || null; const o = list.find((x) => x.id === id);
-        onChange({ id, year: o?.kind === "dated" ? defaultYear(o, start, ref) : null });
+        setExplicit(false);
+        onChange({ id, year: o?.kind === "dated" ? defaultOccurrenceYear(o.ranges, start, ref) : null });
       }}>
         <option value="">None</option>
         <optgroup label="Dated occasions">{dated.map((o) => <option key={o.id} value={o.id}>{o.parent ? "  · " : ""}{o.name} ({o.month})</option>)}</optgroup>
@@ -38,8 +42,8 @@ export function GiftOccasionPicker({ value, year, onChange, business, start, dis
       </select>
     </label>
     {sel?.kind === "dated" && <label style={{ display: "grid", gap: 2 }}>Occurrence year
-      <select aria-label="Occurrence year" disabled={disabled} value={year ?? ""} onChange={(e) => onChange({ id: sel.id, year: Number(e.target.value) })}>
-        {Object.keys(sel.dates).map((y) => <option key={y} value={y}>{y}: {sel.dates[y]}</option>)}
+      <select aria-label="Occurrence year" disabled={disabled} value={year ?? ""} onChange={(e) => { setExplicit(true); onChange({ id: sel.id, year: Number(e.target.value) }); }}>
+        {years.map((y) => <option key={y} value={y}>{y}: {sel.dates[y] ?? "outside the listed years"}</option>)}
       </select>
     </label>}
     {sel && <p className="sub" style={{ flexBasis: "100%", margin: 0 }}>{sel.kind === "dated" ? `${sel.name} ${year}: ${sel.dates[year ?? 0] ?? sel.timing}. The campaign keeps its own start and end dates.` : "Year-round occasion: the promotion's own dates place it on the Calendar."}</p>}
@@ -78,7 +82,7 @@ export function PromotionForm({ initial, brands, onDone, onCancel }: {
       <label style={{ display: "grid", gap: 2 }}>Status<select aria-label="Status" value={v.execution_status} onChange={set("execution_status")}>{STATUSES.map((s) => <option key={s}>{s}</option>)}</select></label>
     </div>
     <label style={{ display: "grid", gap: 2 }}>Offer<input aria-label="Offer" maxLength={500} value={v.offer} onChange={set("offer")} placeholder="e.g. 15% off gift boxes" /></label>
-    {v.business_id && GIFT_BRANDS.includes(v.business_id) && <GiftOccasionPicker business={v.business_id} value={v.gift_occasion_id} year={v.gift_occasion_year} start={v.start_date}
+    {v.business_id && GIFT_BRANDS.includes(v.business_id) && <GiftOccasionPicker business={v.business_id} value={v.gift_occasion_id} year={v.gift_occasion_year} start={v.start_date} yearChosen={initial.gift_occasion_year != null}
       onChange={(g) => setV({ ...v, gift_occasion_id: g.id, gift_occasion_year: g.year })} />}
     {err && <div className="notice">{err}</div>}
     <div className="row"><button className="btn small primary" disabled={saving}>{editing ? "Save" : "Create promotion"}</button><button type="button" className="btn small" onClick={onCancel}>Cancel</button></div>
@@ -95,7 +99,7 @@ export function GiftLinkEditor({ p, onSaved }: { p: any; onSaved: () => void }) 
     catch (x: any) { setErr(x.message); }
   };
   return <div>
-    <GiftOccasionPicker business={p.business_id} value={v.id} year={v.year} start={p.start_date} onChange={setV} />
+    <GiftOccasionPicker business={p.business_id} value={v.id} year={v.year} start={p.start_date} yearChosen={p.gift_occasion_year != null} onChange={setV} />
     <div className="row" style={{ marginTop: 6 }}>
       <button className="btn small primary" onClick={() => save(v)}>Save link</button>
       {p.gift_occasion_id && <button className="btn small" onClick={() => save({ id: null, year: null })}>Clear link</button>}

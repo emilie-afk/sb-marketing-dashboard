@@ -59,6 +59,21 @@ export function occurrence(rule: GiftRule, year: number, override?: { start: str
 }
 
 export const monthName = (m: number) => MONTHS[m - 1];
+
+const isDate = (s: string | null | undefined): s is string => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
+/** The year a promotion form works around: the campaign start's year, or this year while no start is entered. */
+export function campaignYear(start: string | null | undefined, today = new Date()) {
+  return isDate(start) ? Number(start.slice(0, 4)) : today.getUTCFullYear();
+}
+/** The occurrence a campaign starting on `start` leads into: the first one ending on or after the start (so a
+ *  December campaign picks next year's occasion). Without a valid start, the year closest to `fallbackYear`.
+ *  Always returns one of the years offered in `ranges` (an unconfirmed year counts as ending Dec 31). */
+export function defaultOccurrenceYear(ranges: Record<string, { start: string; end: string } | null>, start: string | null | undefined, fallbackYear: number) {
+  const years = Object.keys(ranges).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!years.length) return fallbackYear;
+  if (isDate(start)) for (const y of years) if ((ranges[y]?.end ?? `${y}-12-31`) >= start) return y;
+  return years.reduce((best, y) => (Math.abs(y - fallbackYear) < Math.abs(best - fallbackYear) ? y : best), years[0]);
+}
 export const tbcText = (month: number) => `${monthName(month)}, dates to be confirmed`;
 
 export const GIFT_OCCASIONS: GiftOccasionDef[] = [

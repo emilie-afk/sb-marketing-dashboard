@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { freshDb, call, q, closePool } from "./helpers";
-import { GIFT_OCCASIONS, occurrence } from "../shared/giftCalendar";
+import { GIFT_OCCASIONS, occurrence, campaignYear, defaultOccurrenceYear } from "../shared/giftCalendar";
 import { seedGiftOccasions } from "../server/giftSeed";
 import { getPool } from "../server/db";
 
@@ -32,6 +32,24 @@ describe("recurrence", () => {
   });
   it("uses the per-year override and otherwise marks organizer-set dates as to be confirmed", () => {
     expect(occurrence(rule("national-volunteer-week"), 2026)).toEqual({ tbc: true, month: 4 });
+  });
+});
+
+describe("occurrence year default in the promotion form", () => {
+  const thanks = { 2025: { start: "2025-11-27", end: "2025-11-27" }, 2026: { start: "2026-11-26", end: "2026-11-26" }, 2027: { start: "2027-11-25", end: "2027-11-25" } };
+  const vday = { 2026: { start: "2026-02-14", end: "2026-02-14" }, 2027: { start: "2027-02-14", end: "2027-02-14" }, 2028: { start: "2028-02-14", end: "2028-02-14" } };
+  it("never yields an invalid year when no start date has been entered", () => {
+    const today = new Date("2026-11-12T08:00:00Z");
+    for (const start of [undefined, null, "", "2026-1", "not a date"]) expect(campaignYear(start as any, today)).toBe(2026);
+    expect(defaultOccurrenceYear(thanks, "", campaignYear("", today))).toBe(2026);
+    expect(defaultOccurrenceYear(thanks, undefined, 2031)).toBe(2027);   // closest offered year
+    expect(defaultOccurrenceYear({}, "", 2026)).toBe(2026);
+  });
+  it("follows the campaign start: the first occurrence ending on or after it", () => {
+    expect(defaultOccurrenceYear(thanks, "2026-11-01", 2026)).toBe(2026);
+    expect(defaultOccurrenceYear(thanks, "2026-11-27", 2026)).toBe(2027);
+    expect(defaultOccurrenceYear(vday, "2026-12-20", 2026)).toBe(2027);   // December campaign leads into next year
+    expect(defaultOccurrenceYear({ 2026: null, 2027: { start: "2027-04-18", end: "2027-04-24" } }, "2026-04-02", 2026)).toBe(2026); // unconfirmed year still offered
   });
 });
 
