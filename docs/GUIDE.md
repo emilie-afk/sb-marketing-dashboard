@@ -55,7 +55,9 @@ Loading a page only reads saved data. Nothing on page load triggers Shopify or S
 
 | Record | Source owns | Dashboard owns |
 |---|---|---|
-| Promotions, vendor offers, special collections | dates, offer, code, channels, materials, vendor cost reduction, customer discount, special (BF/CM) terms, collection link | execution status, owner, notes, tasks, files, history |
+| Promotions, vendor offers, special collections (from a spreadsheet) | dates, offer, code, channels, materials, vendor cost reduction, customer discount, special (BF/CM) terms, collection link | execution status, owner, notes, gift occasion link, tasks, files, history |
+| Promotions created in the dashboard (no spreadsheet row) | n/a | everything: name, offer, dates, status, owner, gift occasion link. If a spreadsheet row later matches one, the spreadsheet takes over its source fields. |
+| Gift occasions (recurring U.S. gift calendar) | `shared/giftCalendar.ts`, seeded by `npm run db:migrate` | per-year date overrides (`gift_occasion_overrides`) |
 | Occasions | name, date, type, note | "selected for use" (creates a promotion) |
 | Sales, profit, ads, listing checks | everything submitted | campaign inclusion, finding decisions, task links, implementation notes |
 | Tasks created in the dashboard | n/a | everything. **The dashboard is the editing authority for its own marketing tasks.** |
@@ -75,6 +77,15 @@ Spreadsheet sync is one-way. Precedence when two sheets describe the same promot
 - Reconciliation (contract `schema_version: 2`): the tracker's last page lists every task currently in scope, whatever its dates. Copies of tasks not on that list are hidden, however long ago they were synced (so a dashboard reconnecting after a long gap still drops deleted, unassigned or out-of-scope tasks); occurrences outside their task's date span are hidden; one-time tasks and occurrences inside the snapshot window that are missing are hidden. Other older occurrences stay as history. Removal markers only add the reason. Archived brands that remain mapped stay visible, labelled archived.
 - Ownership: each record carries the person who owned the task on that record's date, so completed work stays credited to its original owner after reassignment or archival.
 - Access: tracker membership grants nothing here (only `TEAM_MEMBERS` does), and a Management role in the tracker does not change dashboard roles.
+
+### Gift calendar
+
+- Occasions live in `shared/giftCalendar.ts` (stable ids, date rules, gift themes, lead-ins, applicable brands) and are seeded into `gift_occasions` after every `db:migrate`. The seed is safe to rerun: occasions are updated in place by id, so promotion links survive; per-year overrides are only inserted when missing.
+- Dated occasions are placed for the years being viewed as all-day dates (no clock time), so they show on the same day in Vietnam and U.S. time zones. Seasonal windows (multi-week) can be hidden on the Calendar; a lead-in month is shown in the details, never as the window itself. Teacher Appreciation Day is listed inside Teacher Appreciation Week. An occasion with organizer-set dates and no override for a year shows "<Month>, dates to be confirmed".
+- Year-round occasions appear only in the promotion picker; their promotions place them on the Calendar.
+- A promotion's link stores the occasion and, for dated occasions, the occurrence year (so a December campaign can lead into next year's occasion). Year-round links have no year. The link is a dashboard field: spreadsheet sync never writes it, and linking or clearing it leaves the rest of the promotion unchanged.
+- Permissions follow the existing roles: viewers see everything permitted; editors and admins create dashboard promotions and change links (the server answers `403` to viewers).
+- To add a confirmed date for a year (e.g. National Volunteer Week), add it to `GIFT_OVERRIDES` and run `db:migrate`, or insert a row into `gift_occasion_overrides`.
 
 ## 4. Promotion spreadsheet sync
 
@@ -143,6 +154,7 @@ Not done in this delivery. When approved:
 ## 10. Rollback
 
 - App: redeploy the previous Netlify deploy (instant rollback in Netlify).
+- Gift calendar only: run `009_gift_calendar.down.sql`. It removes the gift occasions and every promotion's occasion link; promotions themselves (including ones created in the dashboard) are kept.
 - Task Tracker pull only: unset `TASK_TRACKER_API_URL` (stops reading; the last copy stays visible), or run `006_task_tracker.down.sql` to remove the copies (the tracker keeps every task).
-- Database: export first (`pg_dump --data-only`), then run the rollback scripts in reverse order: `007_campaign_daily_budget.down.sql`, `006_task_tracker.down.sql`, `005_reporting_pulls.down.sql`, `004_sync_jobs.down.sql`, `003_reference_data.down.sql`, `002_planning_tasks_reviews_reports.down.sql`, `001_foundation.down.sql`. Each removes its own `schema_migrations` row. Attachment blobs are not deleted by SQL; delete the `private-attachments` blob store separately if required.
+- Database: export first (`pg_dump --data-only`), then run the rollback scripts in reverse order: `009_gift_calendar.down.sql`, `008_retire_task_tracker_placeholder.down.sql`, `007_campaign_daily_budget.down.sql`, `006_task_tracker.down.sql`, `005_reporting_pulls.down.sql`, `004_sync_jobs.down.sql`, `003_reference_data.down.sql`, `002_planning_tasks_reviews_reports.down.sql`, `001_foundation.down.sql`. Each removes its own `schema_migrations` row. Attachment blobs are not deleted by SQL; delete the `private-attachments` blob store separately if required.
 - Spreadsheets are never written, so no spreadsheet rollback is needed.

@@ -7,6 +7,7 @@ import { isIsoDate, addDays, todayIn, OPERATIONS_TZ } from "../../shared/dates";
 import { occurrences } from "../../shared/recurrence";
 import { validationErrors } from "../../shared/submission";
 import { audit } from "../audit";
+import { giftCalendarItems, checkGiftLink } from "./gifts";
 import { trackerTaskItems, trackerTaskDetail, trackerCalendar, trackerFreshness, isTrackerId, assertDashboardTask } from "../trackerTasks";
 
 const STATUS = z.enum(["todo", "in_progress", "waiting", "done", "cancelled"]);
@@ -138,10 +139,15 @@ export function registerWork(r: Router) {
 
   // ---------------- promotions (dashboard-owned fields only; source fields come from the spreadsheet)
   r.get("/promotions/:id", async ({ params }) => {
-    const p = await one<any>("select p.*, to_char(start_date,'YYYY-MM-DD') start_date, to_char(end_date,'YYYY-MM-DD') end_date from promotions p where id = $1", [params.id]);
+    const p = await one<any>(`select p.*, to_char(start_date,'YYYY-MM-DD') start_date, to_char(end_date,'YYYY-MM-DD') end_date,
+                                     g.name gift_occasion_name, g.kind gift_occasion_kind
+                                from promotions p left join gift_occasions g on g.id = p.gift_occasion_id where p.id = $1`, [params.id]);
     if (!p) throw notFound("Promotion");
+    const sourceOwned = !!(await one("select 1 from promotion_source_links where promotion_id = $1 limit 1", [params.id]));
     return {
       promotion: p,
+      // Spreadsheet promotions keep their name, offer and dates in the spreadsheet; dashboard-created ones are edited here.
+      sourceOwned,
       sources: await query("select s.label, s.role, l.last_tab, l.last_seen_at from promotion_source_links l join sheet_sources s on s.id = l.sheet_source_id where l.promotion_id = $1", [params.id]),
       history: await query("select changed_at, changed_by, changes from promotion_revisions where promotion_id = $1 order by changed_at desc limit 100", [params.id]),
       tasks: await query("select id, title, status, owner, to_char(due_date,'YYYY-MM-DD') due_date from tasks where promotion_id = $1 order by due_date nulls last", [params.id]),
@@ -149,19 +155,60 @@ export function registerWork(r: Router) {
       files: await query("select id, filename, content_type, size_bytes, uploaded_at from attachments where owner_type = 'promotion' and owner_id = $1", [params.id]),
     };
   });
+  const PROMO_STATUS = z.enum(["planned", "preparing", "ready", "launched", "ended", "cancelled"]);
+  const giftYear = z.number().int().min(2000).max(2100).nullable().optional();
+  // Create a dashboard-owned promotion (e.g. from a gift occasion). Spreadsheet promotions keep coming from the sync.
+  r.post("/promotions", async ({ req, session }) => {
+    const b = parse(z.object({
+      business_id: z.enum(["sb", "p2s", "perksradar"]), title: z.string().trim().min(1).max(300), offer: z.string().trim().max(500).nullable().optional(),
+      execution_status: PROMO_STATUS.default("planned"), owner: z.string().max(120).nullable().optional(), start_date: date, end_date: date,
+      gift_occasion_id: z.string().max(60).nullable().optional(), gift_occasion_year: giftYear,
+    }).strict(), await readJson(req));
+    if (b.end_date < b.start_date) throw badRequest("The end date is before the start date.");
+    const link = await checkGiftLink(b.gift_occasion_id, b.gift_occasion_year, b.business_id);
+    return tx(async (c) => {
+      const p = (await c.query(
+        `insert into promotions (business_id, year, kind, title, offer, start_date, end_date, date_text, execution_status, owner, gift_occasion_id, gift_occasion_year, created_by)
+         values ($1,$2,'promotion',$3,$4,$5,$6,'Set in the dashboard',$7,$8,$9,$10,$11) returning id, version`,
+        [b.business_id, Number(b.start_date.slice(0, 4)), b.title, b.offer ?? null, b.start_date, b.end_date, b.execution_status, b.owner ?? null, link.id, link.year, session.email])).rows[0];
+      await c.query("insert into promotion_revisions (promotion_id, changed_by, changes) values ($1,$2,$3)",
+        [p.id, session.email, JSON.stringify({ created: { from: null, to: b.title }, ...(link.id ? { gift_occasion: { from: null, to: link.year ? `${link.id} ${link.year}` : link.id } } : {}) })]);
+      return { id: p.id, version: p.version };
+    });
+  });
   r.patch("/promotions/:id", async ({ req, params, session }) => {
     const body = await readJson(req);
     const patch = parse(z.object({
-      execution_status: z.enum(["planned", "preparing", "ready", "launched", "ended", "cancelled"]).optional(),
-      execution_note: z.string().max(2000).nullable().optional(), owner: z.string().max(120).nullable().optional(), version: z.number().int(),
+      execution_status: PROMO_STATUS.optional(),
+      execution_note: z.string().max(2000).nullable().optional(), owner: z.string().max(120).nullable().optional(),
+      // Dashboard-owned on every promotion:
+      gift_occasion_id: z.string().max(60).nullable().optional(), gift_occasion_year: giftYear,
+      // Only for promotions created in the dashboard (spreadsheet promotions change in the spreadsheet):
+      title: z.string().trim().min(1).max(300).optional(), offer: z.string().trim().max(500).nullable().optional(), start_date: date.optional(), end_date: date.optional(),
+      version: z.number().int(),
     }).strict(), body);
     const { version, ...fields } = patch;
     const keys = Object.keys(fields);
-    if (!keys.length) throw badRequest("Nothing to change. Spreadsheet-owned fields can only change in the spreadsheet.");
-    const res = await query(`update promotions set ${keys.map((k, i) => `${k} = $${i + 3}`).join(", ")}, updated_at = now(), version = version + 1
-                             where id = $1 and version = $2 returning version`, [params.id, version, ...keys.map((k) => (fields as any)[k])]);
+    if (!keys.length) throw badRequest("Nothing to change.");
+    const cur = await one<any>("select id, business_id, title, offer, to_char(start_date,'YYYY-MM-DD') start_date, to_char(end_date,'YYYY-MM-DD') end_date, execution_status, execution_note, owner, gift_occasion_id, gift_occasion_year from promotions where id = $1", [params.id]);
+    if (!cur) throw notFound("Promotion");
+    const sourceKeys = keys.filter((k) => ["title", "offer", "start_date", "end_date"].includes(k));
+    if (sourceKeys.length && await one("select 1 from promotion_source_links where promotion_id = $1 limit 1", [params.id]))
+      throw badRequest("This promotion comes from the promotion spreadsheet: change its name, offer and dates there.");
+    const next = { ...cur, ...fields };
+    if ((next.start_date && !next.end_date) || (!next.start_date && next.end_date) || (next.start_date && next.end_date < next.start_date)) throw badRequest("Set a start and end date, with the end on or after the start.");
+    if ("gift_occasion_id" in fields || "gift_occasion_year" in fields) {
+      if (fields.gift_occasion_id === null) { next.gift_occasion_year = null; (fields as any).gift_occasion_year = null; }
+      const link = await checkGiftLink(next.gift_occasion_id, next.gift_occasion_year, cur.business_id);
+      (fields as any).gift_occasion_id = link.id; (fields as any).gift_occasion_year = link.year;
+    }
+    const setKeys = Object.keys(fields);
+    if ("start_date" in fields) { setKeys.push("year"); (fields as any).year = Number(next.start_date.slice(0, 4)); }
+    const res = await query(`update promotions set ${setKeys.map((k, i) => `${k} = $${i + 3}`).join(", ")}, updated_at = now(), version = version + 1
+                             where id = $1 and version = $2 returning version`, [params.id, version, ...setKeys.map((k) => (fields as any)[k])]);
     if (!res.length) throw conflict();
-    await query("insert into promotion_revisions (promotion_id, changed_by, changes) values ($1,$2,$3)", [params.id, session.email, JSON.stringify(Object.fromEntries(keys.map((k) => [k, { to: (fields as any)[k] }])))]);
+    const changes = Object.fromEntries(Object.keys(fields).filter((k) => k !== "year" && cur[k] !== (fields as any)[k]).map((k) => [k, { from: cur[k] ?? null, to: (fields as any)[k] }]));
+    if (Object.keys(changes).length) await query("insert into promotion_revisions (promotion_id, changed_by, changes) values ($1,$2,$3)", [params.id, session.email, JSON.stringify(changes)]);
     return { ok: true, version: res[0].version };
   });
 
@@ -172,16 +219,23 @@ export function registerWork(r: Router) {
     const b = url.searchParams.get("business");
     const types = (url.searchParams.get("types") ?? "occasion,promotion,launch,task").split(",");
     const items: any[] = [];
+    let undated: any[] = [];
+    if (types.includes("gift")) {
+      const g = await giftCalendarItems(from, to, b, url.searchParams.get("seasonal") !== "0");
+      items.push(...g.items); undated = g.undated;
+    }
     if (types.includes("occasion"))
       for (const o of await query<any>(`select id, business_id, name, to_char(occasion_date,'YYYY-MM-DD') d, occasion_type, selected_promotion_id
                                           from occasions where occasion_date between $1 and $2 and ($3::text is null or business_id = $3)`, [from, to, b]))
         items.push({ type: "occasion", id: o.id, business: o.business_id, title: o.name, start: o.d, end: o.d, detail: o.occasion_type, promotionId: o.selected_promotion_id });
     if (types.includes("promotion") || types.includes("launch"))
-      for (const p of await query<any>(`select id, business_id, kind, title, to_char(start_date,'YYYY-MM-DD') s, to_char(end_date,'YYYY-MM-DD') e, execution_status, code,
-                                               to_char(prep_deadline,'YYYY-MM-DD') prep, to_char(feature_date,'YYYY-MM-DD') feature, review_state
-                                          from promotions where start_date <= $2 and end_date >= $1 and ($3::text is null or business_id = $3)`, [from, to, b])) {
+      for (const p of await query<any>(`select p.id, p.business_id, p.kind, p.title, to_char(p.start_date,'YYYY-MM-DD') s, to_char(p.end_date,'YYYY-MM-DD') e, p.execution_status, p.code,
+                                               to_char(p.prep_deadline,'YYYY-MM-DD') prep, to_char(p.feature_date,'YYYY-MM-DD') feature, p.review_state, g.name gift_name, p.gift_occasion_year gift_year
+                                          from promotions p left join gift_occasions g on g.id = p.gift_occasion_id
+                                         where p.start_date <= $2 and p.end_date >= $1 and ($3::text is null or p.business_id = $3)`, [from, to, b])) {
         const type = p.kind === "launch" || p.kind === "milestone" ? "launch" : "promotion";
-        if (types.includes(type)) items.push({ type, id: p.id, business: p.business_id, title: p.title, start: p.s, end: p.e, detail: p.code, status: p.execution_status, kind: p.kind, review: p.review_state });
+        const gift = p.gift_name ? `${p.gift_name}${p.gift_year ? ` ${p.gift_year}` : ""}` : null;
+        if (types.includes(type)) items.push({ type, id: p.id, business: p.business_id, title: p.title, start: p.s, end: p.e, detail: [p.code, gift && `Gift occasion: ${gift}`].filter(Boolean).join(" · ") || null, status: p.execution_status, kind: p.kind, review: p.review_state, giftOccasion: gift });
         if (p.prep && p.prep >= from && p.prep <= to && types.includes("task")) items.push({ type: "deadline", id: p.id, business: p.business_id, title: `Prep deadline: ${p.title}`, start: p.prep, end: p.prep });
         if (p.feature && p.feature >= from && p.feature <= to && types.includes("launch")) items.push({ type: "launch", id: p.id, business: p.business_id, title: `Feature: ${p.title}`, start: p.feature, end: p.feature });
       }
@@ -192,7 +246,7 @@ export function registerWork(r: Router) {
     }
     if (types.includes("task")) items.push(...(await trackerCalendar(from, to, b)));
     items.sort((a, b2) => (a.start < b2.start ? -1 : a.start > b2.start ? 1 : a.type.localeCompare(b2.type)));
-    return { items, from, to, timezoneNote: "Promotion dates follow the spreadsheet (Pacific time for offers). Task deadlines use Vietnam time." };
+    return { items, undated, from, to, timezoneNote: "Promotion dates follow the spreadsheet (Pacific time for offers). Task deadlines use Vietnam time. Gift occasions are all-day U.S. dates." };
   });
   // An occasion becomes an execution record only when someone selects it for use.
   r.post("/occasions/:id/select", async ({ params, session }) => {

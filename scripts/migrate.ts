@@ -3,6 +3,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getPool, closePool } from "../server/db";
+import { seedGiftOccasions } from "../server/giftSeed";
 
 export async function migrate(log = console.log) {
   const pool = getPool();
@@ -26,6 +27,8 @@ export async function migrate(log = console.log) {
       c.release();
     }
   }
+  // Reference data that follows the code (safe to rerun; keeps existing promotion links).
+  await seedGiftOccasions(pool);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
