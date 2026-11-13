@@ -78,7 +78,9 @@ export async function advertising(b: string | null, range: DateRange, includeZer
   // weeks is added up across them. A week running past the range is never split: the campaign's figures are marked
   // incomplete and say which week was left out. A result for exactly the range is used on its own.
   const fitting = rows.filter((r) => periodWithin({ start: r.period_start, end: r.period_end }, range));
-  const rank = (r: any) => (r.granularity === "day" ? 0 : r.granularity === "week" ? 1 : 2);
+  // Whole weeks inside the range first (they carry the week's purchases), then daily results for the days no
+  // whole week covers, then anything else.
+  const rank = (r: any) => (r.granularity === "week" ? 0 : r.granularity === "day" ? 1 : 2);
   const outside = new Map<string, { start: string; end: string }[]>();
   for (const r of rows) if (!periodWithin({ start: r.period_start, end: r.period_end }, range)) outside.set(r.id, [...(outside.get(r.id) ?? []), { start: r.period_start, end: r.period_end }]);
   const byCampaign = new Map<string, any[]>();
@@ -86,15 +88,14 @@ export async function advertising(b: string | null, range: DateRange, includeZer
   const merged = [...byCampaign.values()].map((rs) => {
     const taken = new Set<string>();
     const exact = rs.filter((r) => r.period_start === range.start && r.period_end === range.end);
-    // Daily results first; then whole weeks inside the range for days no daily result covers. A period that
-    // overlaps one already counted is left out, so spend is never counted twice.
+    // A period that overlaps one already counted is left out, so spend is never counted twice.
     const pool = exact.length ? exact : [...rs].sort((a, b) => rank(a) - rank(b) || a.period_start.localeCompare(b.period_start) || a.period_end.localeCompare(b.period_end));
     const use: any[] = [];
     let overlapped = false;
     for (const r of pool) {
       const days = eachDay({ start: r.period_start, end: r.period_end });
       if (days.some((d) => taken.has(d))) {
-        // A week whose days are already counted from daily results is expected; two results of the same kind overlapping is not.
+        // Daily results inside a week already counted are expected; two results of the same kind overlapping is not.
         if (use.some((u) => u.granularity === r.granularity && u.period_start <= r.period_end && u.period_end >= r.period_start)) overlapped = true;
         continue;
       }

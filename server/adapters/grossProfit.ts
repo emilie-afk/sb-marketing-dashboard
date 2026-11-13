@@ -36,21 +36,31 @@ const obs = (metric: string, v: number | null) => v === null
   ? { metric, scope: GP_SCOPE, scope_label: GP_SCOPE_LABEL, value: null, state: "missing" as const }
   : { metric, scope: GP_SCOPE, scope_label: GP_SCOPE_LABEL, value: v };
 
-const close = (a: number, b: number | null) => b !== null && Math.abs(a - b) <= 0.05;
-/** A week's days, only when they lie inside the week, are complete figures and add up to the week's totals. */
+const DAY_METRICS = ["gross_profit", "gross_profit_revenue_basis", "product_cost", "shipping_cost"] as const;
+/**
+ * A week's days, only when they lie inside the week and all four figures agree with the week's totals (±$0.05).
+ * A figure missing from the week stays missing on every day; a figure the week has must be present on every day.
+ * Gross profit and its revenue basis must be known. Otherwise no days are used and only the week total is kept.
+ */
 export function usableDays(w: Week) {
   const days = w.days ?? [];
   if (!days.length || new Set(days.map((d) => d.date)).size !== days.length) return [];
-  if (days.some((d) => d.date < w.period.start || d.date > w.period.end || d.gross_profit === null || d.gross_profit_revenue_basis === null)) return [];
-  const sum = (k: "gross_profit" | "gross_profit_revenue_basis" | "product_cost" | "shipping_cost") => days.reduce((a, d) => a + (d[k] ?? 0), 0);
-  if (!close(sum("gross_profit"), w.totals.gross_profit) || !close(sum("gross_profit_revenue_basis"), w.totals.gross_profit_revenue_basis)) return [];
-  return [...days].sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (days.some((d) => d.date < w.period.start || d.date > w.period.end)) return [];
+  if (w.totals.gross_profit === null || w.totals.gross_profit_revenue_basis === null) return [];
+  for (const k of DAY_METRICS) {
+    const total = w.totals[k];
+    if (total === null) continue;
+    if (days.some((d) => d[k] === null || d[k] === undefined)) return [];
+    if (Math.abs(days.reduce((a, d) => a + (d[k] as number), 0) - total) > 0.05) return [];
+  }
+  return [...days].sort((a, b) => (a.date < b.date ? -1 : 1))
+    .map((d) => ({ ...d, ...Object.fromEntries(DAY_METRICS.filter((k) => w.totals[k] === null).map((k) => [k, null])) }) as typeof d);
 }
 
 /** One published week → one submission (week totals, plus the same figures by day when the app sends them). */
 export function weekToSubmission(w: Week) {
   const days = usableDays(w);
-  const dayObs = days.flatMap((d) => (["gross_profit", "gross_profit_revenue_basis", "product_cost", "shipping_cost"] as const)
+  const dayObs = days.flatMap((d) => DAY_METRICS
     .map((k) => ({ ...obs(k, d[k] ?? null), period_start: d.date, period_end: d.date, granularity: "day" as const })));
   return {
     schema_version: 1,

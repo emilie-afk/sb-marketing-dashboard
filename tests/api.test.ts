@@ -206,6 +206,30 @@ describe("daily campaign results", () => {
   });
 });
 
+describe("complete weeks with daily spend", () => {
+  it("keeps the weekly rows that carry purchases, so CPA and ROAS work across several complete weeks", async () => {
+    const weeks = [["2025-08-02", "2025-08-08"], ["2025-08-09", "2025-08-15"]];
+    for (const [i, [start, end]] of weeks.entries()) {
+      await submit({ ...envelope(`gw-${i}`, "sb", { start, end }), source: "ads",
+        records: { campaigns: [{ platform: "google", external_id: "w-1", name: "Weekly purchases test", spend: 70, acquisitions: 7, conversion_value: 280 }] } });
+      for (let k = 0; k < 7; k++) {
+        const d = new Date(Date.parse(`${start}T00:00:00Z`) + k * 864e5).toISOString().slice(0, 10);
+        await submit({ ...envelope(`gw-${i}-d${k}`, "sb", { start: d, end: d }, "day"), source: "ads",
+          records: { campaigns: [{ platform: "google", external_id: "w-1", name: "Weekly purchases test", spend: 10, acquisitions: null, conversion_value: null }] } });
+      }
+    }
+    const c = (await call("viewer", "GET", "/business/sb/advertising?start=2025-08-02&end=2025-08-15")).body.platforms.find((p: any) => p.platform === "google")
+      .campaigns.find((x: any) => x.name === "Weekly purchases test");
+    expect(c.spend).toMatchObject({ state: "value", value: 140 });
+    expect(c.cpa).toMatchObject({ state: "value", value: 10 });
+    expect(c.roas).toMatchObject({ state: "value", value: 4 });
+    // A range starting mid-week: the whole week inside it keeps its purchases; the days before it come from daily spend.
+    const part = (await call("viewer", "GET", "/business/sb/advertising?start=2025-08-06&end=2025-08-15")).body.platforms.find((p: any) => p.platform === "google")
+      .campaigns.find((x: any) => x.name === "Weekly purchases test");
+    expect(part.spend).toMatchObject({ state: "value", value: 30 + 70 });
+  });
+});
+
 describe("campaign results across weeks", () => {
   it("never counts overlapping periods twice and withholds CPA/ROAS across different definitions", async () => {
     const w1 = { start: "2027-04-03", end: "2027-04-09" }, w2 = { start: "2027-04-10", end: "2027-04-16" }, wOverlap = { start: "2027-04-05", end: "2027-04-11" };

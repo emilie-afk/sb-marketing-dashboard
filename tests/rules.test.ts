@@ -66,6 +66,22 @@ describe("source date coverage", () => {
     // Part of a month with only weekly totals: whole weeks inside the range, the rest reported as gaps.
     expect(resolveCoverage({ start: "2026-11-07", end: "2026-11-13" }, [...weeks, ...months])).toMatchObject({ status: "supported", granularity: "week" });
   });
+  it("partial daily figures never hide whole weeks: each date counted once", () => {
+    const weeks = [{ start: "2026-11-07", end: "2026-11-13", granularity: "week" as const }, { start: "2026-11-14", end: "2026-11-20", granularity: "week" as const }];
+    const oneDay = [{ start: "2026-11-09", end: "2026-11-09", granularity: "day" as const }];
+    const r = resolveCoverage({ start: "2026-11-07", end: "2026-11-20" }, [...weeks, ...oneDay]) as any;
+    expect(r).toMatchObject({ status: "supported", granularity: "week" });
+    expect(r.periods.map((p: any) => `${p.granularity}:${p.start}`)).toEqual(["week:2026-11-07", "week:2026-11-14"]);
+    // A week reported for every one of its days uses the days; the other week its total.
+    const allDays = Array.from({ length: 7 }, (_, i) => ({ start: addDays("2026-11-07", i), end: addDays("2026-11-07", i), granularity: "day" as const }));
+    const r2 = resolveCoverage({ start: "2026-11-07", end: "2026-11-20" }, [...weeks, ...allDays]) as any;
+    expect(r2.status).toBe("supported");
+    expect(r2.periods.map((p: any) => `${p.granularity}:${p.start}`)).toEqual([...allDays.map((d) => `day:${d.start}`), "week:2026-11-14"]);
+    // Days outside any whole week fill in around it; the rest are gaps.
+    const r3 = resolveCoverage({ start: "2026-11-06", end: "2026-11-13" }, [...weeks, { start: "2026-11-06", end: "2026-11-06", granularity: "day" as const }]) as any;
+    expect(r3).toMatchObject({ status: "supported" });
+    expect(r3.periods.map((p: any) => p.start)).toEqual(["2026-11-06", "2026-11-07"]);
+  });
   it("work counts of a period running past the range are prorated by its days", () => {
     expect(overlapShare({ start: "2026-10-31", end: "2026-11-06" }, { start: "2026-11-01", end: "2026-11-30" })).toBeCloseTo(6 / 7);
     expect(overlapShare({ start: "2026-10-31", end: "2026-11-06" }, { start: "2026-10-01", end: "2026-10-31" })).toBeCloseTo(1 / 7);

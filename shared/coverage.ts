@@ -38,9 +38,8 @@ function exactUnion(req: DateRange, agg: AvailablePeriod[]) {
 /**
  * In order:
  * 1. Monthly (or fixed-period) totals that exactly make up the range, e.g. the EOS scorecard's month totals.
- * 2. Daily data covering every day of the range.
- * 3. Daily data with missing days reported as gaps.
- * 4. Weekly totals lying wholly inside the range; days of the range that sit in a week running past it are gaps.
+ * 2. Otherwise daily figures and weekly totals lying wholly inside the range, each date counted once: a week is used
+ *    unless every one of its days is reported by day. Days left uncovered are gaps.
  * Rolling 30-day checks: only a single check whose own window matches exactly.
  */
 export function resolveCoverage(req: DateRange, available: AvailablePeriod[]): CoverageResult {
@@ -52,31 +51,34 @@ export function resolveCoverage(req: DateRange, available: AvailablePeriod[]): C
     const exact = exactUnion(req, available.filter((p) => p.granularity === g));
     if (exact) return { status: "supported", granularity: g, periods: exact, partial: partialOf(exact) };
   }
+  // Daily figures and whole weeks together, counting each date once: a week lying wholly inside the range is used
+  // when its own days are not all reported day by day; otherwise its days are used. Days outside any such week
+  // come from daily figures. Days left uncovered are gaps (a week running past the range is never split).
   const daily = available.filter((p) => p.granularity === "day");
   const have = new Map(daily.map((p) => [p.start, p]));
   const days = eachDay(req);
-  const inRange = days.filter((d) => have.has(d));
-  if (inRange.length === days.length) {
-    const periods = days.map((d) => have.get(d)!);
-    return { status: "supported", granularity: "day", periods, partial: partialOf(periods) };
+  const weekly = available.filter((p) => p.granularity === "week").sort((a, b) => (a.start < b.start ? -1 : 1) || (a.end < b.end ? -1 : 1));
+  const weeksUsed: AvailablePeriod[] = [];
+  const byWeek = new Set<string>();
+  for (const w of weekly.filter((p) => periodWithin(p, req))) {
+    const wd = eachDay(w);
+    if (wd.some((d) => byWeek.has(d))) continue;                     // overlaps a week already counted
+    if (wd.every((d) => have.has(d))) continue;                      // fully reported by day: use the days
+    weeksUsed.push(w); wd.forEach((d) => byWeek.add(d));
   }
-  if (inRange.length) {
-    const missing = days.filter((d) => !have.has(d));
-    const periods = inRange.map((d) => have.get(d)!);
-    return { status: "gaps", granularity: "day", periods, missingDays: missing, note: `${missing.length} of ${days.length} days have no data. Totals cover only the days shown.` };
+  const dayPeriods = days.filter((d) => !byWeek.has(d) && have.has(d)).map((d) => have.get(d)!);
+  const periods = [...weeksUsed, ...dayPeriods].sort((a, b) => (a.start < b.start ? -1 : 1));
+  const covered = new Set([...byWeek, ...dayPeriods.map((p) => p.start)]);
+  const missing = days.filter((d) => !covered.has(d));
+  if (periods.length) {
+    const gran: "day" | "week" = weeksUsed.length ? "week" : "day";
+    if (!missing.length) return { status: "supported", granularity: gran, periods, partial: partialOf(periods) };
+    const note = weeksUsed.length
+      ? `Figures cover the days shown. ${missing.length} day${missing.length === 1 ? "" : "s"} (${spans(missing)}) ${missing.length === 1 ? "is" : "are"} not covered: a week running past this range is never split into days.`
+      : `${missing.length} of ${days.length} days have no data. Totals cover only the days shown.`;
+    return { status: "gaps", granularity: gran, periods, missingDays: missing, note };
   }
-
-  const weekly = available.filter((p) => p.granularity === "week").sort((a, b) => (a.start < b.start ? -1 : 1));
   if (weekly.length) {
-    const inside = weekly.filter((p) => periodWithin(p, req));
-    const overlapping = inside.some((p, i) => i > 0 && p.start <= inside[i - 1].end);
-    const covered = new Set(inside.flatMap((p) => eachDay(p)));
-    const missing = days.filter((d) => !covered.has(d));
-    if (inside.length && !overlapping) {
-      if (!missing.length) return { status: "supported", granularity: "week", periods: inside, partial: partialOf(inside) };
-      return { status: "gaps", granularity: "week", periods: inside, missingDays: missing,
-        note: `Weekly totals cover the days shown. ${missing.length} day${missing.length === 1 ? "" : "s"} (${spans(missing)}) ${missing.length === 1 ? "is" : "are"} not covered: a week running past this range is never split into days.` };
-    }
     const nearest = weekly.filter((p) => p.end >= req.start && p.start <= req.end).map(({ start, end }) => ({ start, end }));
     return { status: "unsupported", reason: `This source has weekly totals only. ${formatRange(req)} does not contain a full reported week, and totals are never split into days.`, nearest };
   }
