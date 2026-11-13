@@ -34,7 +34,7 @@ export function App() {
     switch (section) {
       case "": case undefined: return <Overview period={period} setPeriod={setPeriod} />;
       case "sb": case "p2s": case "perksradar": return <Business id={section} tab={sub} period={period} setPeriod={setPeriod} role={role} />;
-      case "calendar": return <CalendarPage />;
+      case "calendar": return <CalendarPage role={role} />;
       case "tasks": return <TasksPage role={role} />;
       case "reports": return <ReportsPage role={role} />;
       case "toolbox": return <ToolboxPage />;

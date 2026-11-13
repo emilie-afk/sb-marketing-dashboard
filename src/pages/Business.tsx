@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useApi, Async, Section, Tabs, range, money, fmt, api, Drawer, Unavailable, BUSINESS_NAMES, when } from "../lib";
 import { MetricTile, TrendPanel, AdvertisingBlock, PromotionList, WorkBlock, ProductsBlock, VendorTable, PeriodBar, ActivityList } from "../components";
 import { periodQuery } from "./Overview";
+import { GiftLinkEditor, PromotionForm } from "./GiftCalendar";
 import { ListingReviews } from "./ListingReviews";
 import type { Period } from "../App";
 
@@ -196,9 +197,13 @@ function VendorTerms({ items }: { items: any[] }) {
 export function PromotionDrawer({ id, role, onClose }: { id: string; role: string; onClose: () => void }) {
   const s = useApi<any>(`/promotions/${id}`, [id]);
   const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);
   return <Drawer onClose={onClose}><Async s={s}>{(d) => { const p = d.promotion; return (<>
     <h2>{p.title}</h2>
     <p className="sub">{p.start_date ? range({ start: p.start_date, end: p.end_date }) : `Dates not recognised: "${p.date_text}"`} · from {d.sources.map((x: any) => x.label).join(", ") || "dashboard"}</p>
+    {!d.sourceOwned && role !== "viewer" && (editing
+      ? <div className="card flat" style={{ marginBottom: 10 }}><PromotionForm brands={[p.business_id]} initial={p} onCancel={() => setEditing(false)} onDone={() => { setEditing(false); s.reload(); }} /></div>
+      : <button className="btn small" onClick={() => setEditing(true)}>Edit promotion</button>)}
     {d.reviews.map((r: any) => <div key={r.id} className="notice">{r.kind.replace(/_/g, " ")}: {r.details.message}</div>)}
     <dl className="kv">
       <dt>Offer</dt><dd>{p.offer ?? "None"}</dd><dt>Code</dt><dd className="mono">{p.code ?? "None"}</dd>
@@ -210,6 +215,9 @@ export function PromotionDrawer({ id, role, onClose }: { id: string; role: strin
       {p.collection_url && <><dt>Collection</dt><dd><a href={p.collection_url} target="_blank" rel="noreferrer">{p.collection_url}</a></dd></>}
       {p.terms && <><dt>Terms / notes</dt><dd>{p.terms}</dd></>}
     </dl>
+    <h3 style={{ marginTop: 14 }}>Gift occasion</h3>
+    <p className="sub">{p.gift_occasion_name ? `${p.gift_occasion_name}${p.gift_occasion_year ? ` ${p.gift_occasion_year}` : " (year-round)"}` : "Not linked"}. The occasion is context; the campaign keeps its own dates.</p>
+    {role !== "viewer" && ["sb", "p2s"].includes(p.business_id) && <GiftLinkEditor key={`${p.version}`} p={p} onSaved={s.reload} />}
     <h3 style={{ marginTop: 14 }}>Execution (managed here)</h3>
     {role === "viewer" ? <p>{p.execution_status}{p.owner ? `, owner ${p.owner}` : ""}</p> :
       <form className="row" onSubmit={async (e) => { e.preventDefault(); const f = new FormData(e.currentTarget); setSaving(true);

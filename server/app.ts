@@ -6,6 +6,7 @@ import { readSession, loginRedirect, handleCallback, logoutResponse, atLeast } f
 import { hit, subjectKey, clientKey, LIMITS, EXPENSIVE } from "./rateLimit";
 import { registerDashboard } from "./routes/dashboard";
 import { registerWork } from "./routes/work";
+import { registerGifts } from "./routes/gifts";
 import { registerReviews } from "./routes/reviews";
 import { registerReports, storeAttachment } from "./routes/reports";
 import { registerSettings } from "./routes/settings";
@@ -19,6 +20,7 @@ export function createApp() {
   const r = new Router();
   registerDashboard(r);
   registerWork(r);
+  registerGifts(r);
   registerReviews(r);
   registerReports(r);
   registerSettings(r);

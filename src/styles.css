@@ -107,6 +107,9 @@ tr.superseded td { color: var(--muted); text-decoration: line-through; }
 .cal .day { min-height: 92px; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 4px; font-size: 11px; overflow: hidden; }
 .cal .day.out { opacity: .45; } .cal .day.today { outline: 2px solid var(--brand); }
 .cal .ev { display: block; border-radius: 6px; padding: 1px 5px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; color: var(--ink); }
+.ev.gift { background: var(--mauve); border-left: 3px solid #a3779b; } .ev.gift.season { background: #fff; border: 1px dashed #a3779b; border-left-width: 3px; }
+.ev.task.ro { border-left: 3px solid #6f9bbf; }
+.legend { margin: 4px 0 8px; font-size: 11px; } .legend .ev { display: inline-block; border-radius: 6px; padding: 1px 6px; }
 .ev.occasion { background: var(--lavender); } .ev.promotion { background: var(--mint); } .ev.launch { background: var(--yellow); } .ev.task { background: var(--blue); } .ev.deadline { background: var(--coral); }
 
 /* board */
