@@ -235,12 +235,18 @@ export function PromotionDrawer({ id, role, onClose }: { id: string; role: strin
 
 function Corporate({ period }: { period: Period }) {
   const s = usePeriodData("/business/sb/corporate", period);
-  return <Async s={s}>{(d) => <>
+  const signups = useApi<{ count: number | null }>("/sample-signups", []);
+  return <>
+    <Section title="Sample box signups">
+      <Async s={signups}>{(report) => <p>{report.count === null ? "Signup count unavailable." : <><strong>{report.count.toLocaleString()}</strong> all-time</>}</p>}</Async>
+    </Section>
+    <Async s={s}>{(d) => <>
     {d.source && d.source.status !== "ok" && <Unavailable title="Corporate Gifting connection" reason={d.source.status === "failing" ? `The Corporate Gifting app could not be read: ${d.source.last_error ?? "see Settings"}. Figures below are the last successful data.` : "The Corporate Gifting app is not connected yet."} />}
     <p className="sub">{d.note} Monthly figures from the Corporate Gifting app. Orders and units count Shopify orders only; a month with manually recorded sales shows them as incomplete.</p>
     {d.metrics.length > 0 && <div className="grid g4">{d.metrics.map((m: any) => <MetricTile key={m.key} m={{ ...m, label: m.key === "revenue" ? "Corporate revenue" : m.key === "orders" ? "Corporate orders" : "Corporate units" }} />)}</div>}
     <p>Marketplace outreach, proposals, requirements and follow-ups are edited in the <a href="https://sb-corporate-gifts.netlify.app/" target="_blank" rel="noreferrer">Corporate Gifting app</a>.</p>
-  </>}</Async>;
+    </>}</Async>
+  </>;
 }
 
 function Activities({ id }: { id: string }) {

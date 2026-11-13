@@ -1,5 +1,5 @@
 import { GP_SCOPE, GP_SCOPE_LABEL, GP_SOURCE_ID } from "../adapters/grossProfit";
-import { CG_SCOPE, CG_SOURCE_ID } from "../adapters/corporateGifting";
+import { CG_SCOPE, CG_SOURCE_ID, corporateSampleSignups } from "../adapters/corporateGifting";
 import type { Router } from "../router";
 import { trackerWorkRows } from "../trackerTasks";
 import { query, one } from "../db";
@@ -282,6 +282,7 @@ export function registerDashboard(r: Router) {
     return overview(range, p ? p.compare : "previous_period");
   });
   r.get("/status", async () => sourceStatus());
+  r.get("/sample-signups", async () => corporateSampleSignups());
   r.get("/metrics", async () => [...(await metricDefs()).values()]);
   r.get("/business/:id/:section", async ({ params, url }) => {
     const b = params.id;
