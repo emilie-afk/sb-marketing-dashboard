@@ -5,7 +5,8 @@
 import { DateRange, addDays, eachDay, formatRange } from "./dates";
 
 export type Granularity = "day" | "week" | "month" | "rolling_30" | "custom";
-export type AvailablePeriod = DateRange & { granularity: Granularity; completeness?: string };
+/** known: false marks a stored row whose figure is missing or incomplete (zero is a known figure). */
+export type AvailablePeriod = DateRange & { granularity: Granularity; completeness?: string; known?: boolean };
 
 export type CoverageResult =
   | { status: "supported"; granularity: Granularity; periods: AvailablePeriod[]; partial: boolean; note?: string }
@@ -39,7 +40,8 @@ function exactUnion(req: DateRange, agg: AvailablePeriod[]) {
  * In order:
  * 1. Monthly (or fixed-period) totals that exactly make up the range, e.g. the EOS scorecard's month totals.
  * 2. Otherwise daily figures and weekly totals lying wholly inside the range, each date counted once: a week is used
- *    unless every one of its days is reported by day. Days left uncovered are gaps.
+ *    unless every one of its days is reported by day with a known figure (a missing day figure keeps the week total).
+ *    Days left uncovered are gaps.
  * Rolling 30-day checks: only a single check whose own window matches exactly.
  */
 export function resolveCoverage(req: DateRange, available: AvailablePeriod[]): CoverageResult {
@@ -63,7 +65,7 @@ export function resolveCoverage(req: DateRange, available: AvailablePeriod[]): C
   for (const w of weekly.filter((p) => periodWithin(p, req))) {
     const wd = eachDay(w);
     if (wd.some((d) => byWeek.has(d))) continue;                     // overlaps a week already counted
-    if (wd.every((d) => have.has(d))) continue;                      // fully reported by day: use the days
+    if (wd.every((d) => have.get(d)?.known !== false && have.has(d))) continue;   // every day reported with a known figure: use the days
     weeksUsed.push(w); wd.forEach((d) => byWeek.add(d));
   }
   const dayPeriods = days.filter((d) => !byWeek.has(d) && have.has(d)).map((d) => have.get(d)!);

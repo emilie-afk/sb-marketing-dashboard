@@ -82,6 +82,16 @@ describe("source date coverage", () => {
     expect(r3).toMatchObject({ status: "supported" });
     expect(r3.periods.map((p: any) => p.start)).toEqual(["2026-11-06", "2026-11-07"]);
   });
+  it("a day row marked missing keeps the week total; a valid zero day does not", () => {
+    const week = [{ start: "2026-11-07", end: "2026-11-13", granularity: "week" as const, known: true }];
+    const days = (missingOn: string | null) => Array.from({ length: 7 }, (_, i) => addDays("2026-11-07", i))
+      .map((d) => ({ start: d, end: d, granularity: "day" as const, known: d !== missingOn }));
+    const r = resolveCoverage({ start: "2026-11-07", end: "2026-11-13" }, [...week, ...days("2026-11-10")]) as any;
+    expect(r).toMatchObject({ status: "supported", granularity: "week" });
+    expect(r.periods).toHaveLength(1);
+    const z = resolveCoverage({ start: "2026-11-07", end: "2026-11-13" }, [...week, ...days(null)]) as any;
+    expect(z).toMatchObject({ status: "supported", granularity: "day" });
+  });
   it("work counts of a period running past the range are prorated by its days", () => {
     expect(overlapShare({ start: "2026-10-31", end: "2026-11-06" }, { start: "2026-11-01", end: "2026-11-30" })).toBeCloseTo(6 / 7);
     expect(overlapShare({ start: "2026-10-31", end: "2026-11-06" }, { start: "2026-10-01", end: "2026-10-31" })).toBeCloseTo(1 / 7);

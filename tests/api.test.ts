@@ -206,6 +206,27 @@ describe("daily campaign results", () => {
   });
 });
 
+describe("missing daily figures", () => {
+  it("uses the week total when a day is marked missing, but the days when one is a valid zero", async () => {
+    const run = async (prefix: string, week: { start: string; end: string }, special: { state?: string; value: number | null }) => {
+      await submit({ ...envelope(`${prefix}-w`, "p2s", week), records: { observations: [{ metric: "revenue", value: 700 }] } });
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(Date.parse(`${week.start}T00:00:00Z`) + i * 864e5).toISOString().slice(0, 10);
+        const o = i === 3 ? { metric: "revenue", ...special } : { metric: "revenue", value: 100 };
+        await submit({ ...envelope(`${prefix}-d${i}`, "p2s", { start: d, end: d }, "day"), records: { observations: [o] } });
+      }
+      return (await call("viewer", "GET", `/business/p2s/summary?start=${week.start}&end=${week.end}&compare=previous_period`)).body.metrics.find((m: any) => m.key === "revenue");
+    };
+    const missing = await run("md-miss", { start: "2025-02-01", end: "2025-02-07" }, { state: "missing", value: null });
+    expect(missing.value).toMatchObject({ state: "value", value: 700 });
+    expect(missing.coverage.granularity).toBe("week");
+    // A day reported as 0 is a real figure: the days are used (6 × 100 + 0).
+    const zero = await run("md-zero", { start: "2025-02-08", end: "2025-02-14" }, { value: 0 });
+    expect(zero.value).toMatchObject({ state: "value", value: 600 });
+    expect(zero.coverage.granularity).toBe("day");
+  });
+});
+
 describe("complete weeks with daily spend", () => {
   it("keeps the weekly rows that carry purchases, so CPA and ROAS work across several complete weeks", async () => {
     const weeks = [["2025-08-02", "2025-08-08"], ["2025-08-09", "2025-08-15"]];

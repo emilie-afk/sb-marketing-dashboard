@@ -48,7 +48,7 @@ export function baseTotal(rows: ObsRow[], metric: string, range: DateRange): { v
     const cov: CoverageResult = { status: "unsupported", reason: "Reported by more than one source for the same period" };
     return { value: missing(cov.reason), coverage: cov, timezone: null, covered: null };
   }
-  const avail: (AvailablePeriod & { row: ObsRow })[] = mine.map((r) => ({ start: r.period_start, end: r.period_end, granularity: r.granularity, completeness: r.completeness, row: r }));
+  const avail: (AvailablePeriod & { row: ObsRow })[] = mine.map((r) => ({ start: r.period_start, end: r.period_end, granularity: r.granularity, completeness: r.completeness, known: r.value_state === "value", row: r }));
   const cov = resolveCoverage(range, avail);
   if (cov.status === "unsupported") return { value: missing(cov.reason), coverage: cov, timezone: null, covered: null };
   const used = (cov.periods as typeof avail).map((p) => p.row);
@@ -184,7 +184,7 @@ export function grossMarginFromRows(rows: MarginRow[], range: DateRange): { valu
   for (const r of inRange) { const k = `${r.period_start}|${r.period_end}|${r.granularity}`; periodOwners.set(k, (periodOwners.get(k) ?? new Set()).add(owner(r))); }
   if ([...periodOwners.values()].some((o) => o.size > 1))
     return { value: unavailable("Gross profit for this period comes from more than one integration"), coverage: { status: "unsupported", reason: "Reported by more than one integration" }, timezone: null, covered: null };
-  const avail = profit.map((r) => ({ start: r.period_start, end: r.period_end, granularity: r.granularity, completeness: r.completeness, row: r }));
+  const avail = profit.map((r) => ({ start: r.period_start, end: r.period_end, granularity: r.granularity, completeness: r.completeness, known: r.value_state === "value", row: r }));
   const cov = resolveCoverage(range, avail);
   if (cov.status === "unsupported") return { value: unavailable(cov.reason), coverage: cov, timezone: null, covered: null };
   const used = (cov.periods as typeof avail).map((p) => p.row);
