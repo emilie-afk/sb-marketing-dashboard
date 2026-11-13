@@ -101,6 +101,36 @@ describe("periods through the API", () => {
   });
 });
 
+describe("Mon–Fri working weeks across a month", () => {
+  const satFri = (s: string) => ({ start: s, end: new Date(Date.parse(`${s}T00:00:00Z`) + 6 * 864e5).toISOString().slice(0, 10) });
+  it("counts Saturday–Friday weekly figures, campaigns and activities toward the month their working days fall in", async () => {
+    const weeks = ["2027-01-30", "2027-02-06", "2027-02-13", "2027-02-20"].map(satFri);   // Feb 2027: Jan 30 – Feb 5 works Feb 1–5
+    for (const [i, w] of weeks.entries()) {
+      await submit({ ...envelope(`ww-${i}`, "sb", w), records: { observations: [{ metric: "revenue", value: 100 * (i + 1) }, { metric: "orders", value: 10 }],
+        campaigns: [{ platform: "facebook", external_id: "120001", name: "New Sales Campaign - All products", spend: 10, acquisitions: 1, conversion_value: 30, daily_budget: 20 + i },
+          { platform: "facebook", external_id: "120002", name: "New Sales Campaign - All products", spend: 5, acquisitions: 0, conversion_value: 0 }],
+        activities: [{ type: "social", name: "Weekly posts (working-week test)", count: 3, count_unit: "posts" }] } });
+    }
+    const feb = { start: "2027-02-01", end: "2027-02-28" };
+    const sum = await call("viewer", "GET", `/business/sb/summary?start=${feb.start}&end=${feb.end}&compare=previous_period`);
+    const rev = sum.body.metrics.find((m: any) => m.key === "revenue");
+    expect(rev.value).toMatchObject({ state: "value", value: 1000 });   // all four weeks; Feb 2027 has no working day outside them
+    expect(rev.coverage.status).toBe("supported");
+    const ads = (await call("viewer", "GET", `/business/sb/advertising?start=${feb.start}&end=${feb.end}`)).body.platforms.find((p: any) => p.platform === "facebook");
+    // Two campaigns share a name but keep their own identity, each added up across the four weeks.
+    expect(ads.campaigns.map((c: any) => [c.name, c.spend.value])).toEqual([["New Sales Campaign - All products", 40], ["New Sales Campaign - All products", 20]]);
+    expect(ads.campaigns[0].dailyBudget.value).toBe(23);
+    expect(ads.reportedPeriods).toHaveLength(4);
+    expect(ads.totals.spend.value).toBe(60);
+    // The report snapshot picks up the weekly activities by their working days too.
+    const { activitiesInPeriod } = await import("../server/routes/reports");
+    expect((await activitiesInPeriod("sb", feb.start, feb.end)).filter((a: any) => a.name.startsWith("Weekly posts")).length).toBe(4);
+    // March starts inside no reported week: nothing from February spills into it.
+    const mar = (await call("viewer", "GET", `/business/sb/summary?start=2027-03-01&end=2027-03-31&compare=previous_period`)).body.metrics.find((m: any) => m.key === "revenue");
+    expect(mar.value.state).toBe("missing");
+  });
+});
+
 describe("advertising", () => {
   it("hides zero-spend campaigns unless included, and has no total row in campaign tables", async () => {
     await submit({ ...envelope("ads-1", "sb", week), source: "ads", records: { campaigns: [

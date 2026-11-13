@@ -1,7 +1,7 @@
 // Reads active observations for a period, honouring each source's real coverage.
 import { query } from "./db";
 import { DateRange, addDays, comparisonPeriod, ComparisonKind, dayCount, equivalentElapsed } from "../shared/dates";
-import { resolveCoverage, AvailablePeriod, CoverageResult } from "../shared/coverage";
+import { resolveCoverage, periodWithin, AvailablePeriod, CoverageResult } from "../shared/coverage";
 import { Fig, fig, missing, notApplicable, sumFigs, ratio, change, Change, purchaseCpa, Unit, Direction } from "../shared/metrics";
 
 type ObsRow = { metric_key: string; scope_key: string; period_start: string; period_end: string; granularity: any; timezone: string;
@@ -40,7 +40,7 @@ export function baseTotal(rows: ObsRow[], metric: string, range: DateRange): { v
   const mine = rows.filter((r) => r.metric_key === metric);
   // The same figure for the same period from more than one source is never added together.
   const seen = new Map<string, Set<string>>();
-  for (const r of mine.filter((r) => r.period_start >= range.start && r.period_end <= range.end)) {
+  for (const r of mine.filter((r) => periodWithin({ start: r.period_start, end: r.period_end, granularity: r.granularity }, range))) {
     const k = `${r.period_start}|${r.period_end}|${r.granularity}`;
     seen.set(k, (seen.get(k) ?? new Set()).add(r.source_id));
   }
@@ -171,7 +171,7 @@ const owner = (r: MarginRow) => `${r.source_id}|${r.submitter}|${r.submission_so
 
 export function grossMarginFromRows(rows: MarginRow[], range: DateRange): { value: Fig; coverage: CoverageResult; timezone: string | null; covered: DateRange | null } {
   const profit = rows.filter((r) => r.metric_key === "gross_profit");
-  const inRange = profit.filter((r) => r.period_start >= range.start && r.period_end <= range.end);
+  const inRange = profit.filter((r) => periodWithin({ start: r.period_start, end: r.period_end, granularity: r.granularity }, range));
   const periodOwners = new Map<string, Set<string>>();
   for (const r of inRange) { const k = `${r.period_start}|${r.period_end}|${r.granularity}`; periodOwners.set(k, (periodOwners.get(k) ?? new Set()).add(owner(r))); }
   if ([...periodOwners.values()].some((o) => o.size > 1))

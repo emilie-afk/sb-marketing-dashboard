@@ -8,6 +8,7 @@ import { compared, trend, metricDefs } from "../metricQuery";
 import { DateRange, isIsoDate, addDays, comparisonPeriod, ComparisonKind, todayIn, OPERATIONS_TZ, formatRange } from "../../shared/dates";
 import { Fig, fig, missing, notApplicable, sumFigs, ratio, purchaseCpa, change } from "../../shared/metrics";
 import { rankingScopeLabel, totalWithBreakdown, trackedChannels } from "../../shared/scope";
+import { periodWithin } from "../../shared/coverage";
 
 const BUSINESSES = ["sb", "p2s", "perksradar"] as const;
 const HEADLINE: Record<string, string[]> = {
@@ -65,29 +66,45 @@ export async function advertising(b: string | null, range: DateRange, includeZer
     `select c.id, c.business_id, c.platform, c.name, c.external_id,
             p.spend::float8 spend, p.acquisitions::float8 acquisitions, p.conversion_value::float8 conversion_value, p.acquisition_event, p.attribution,
             p.reported_cpa::float8 reported_cpa, p.reported_roas::float8 reported_roas,
-            p.daily_budget::float8 daily_budget, p.budget_note,
+            p.daily_budget::float8 daily_budget, p.budget_note, p.granularity,
             to_char(p.period_start,'YYYY-MM-DD') period_start, to_char(p.period_end,'YYYY-MM-DD') period_end, p.timezone,
             (select status from campaign_status_history h where h.campaign_id = c.id order by observed_at desc limit 1) as current_status,
             (select observed_at from campaign_status_history h where h.campaign_id = c.id order by observed_at desc limit 1) as status_observed_at,
             exists (select 1 from campaign_inclusions i where i.campaign_id = c.id) as explicitly_included
        from ad_campaigns c join campaign_performance p on p.campaign_id = c.id and p.status = 'active'
-      where ($1::text is null or c.business_id = $1) and p.period_start = $2 and p.period_end = $3
-      order by c.business_id, c.platform, p.spend desc nulls last`, [b, range.start, range.end]);
+      where ($1::text is null or c.business_id = $1) and p.period_end >= $2 and p.period_start <= $3
+      order by c.business_id, c.platform, p.period_start`, [b, range.start, range.end]);
+  // Weekly results count toward the range by their Mon–Fri working days; a campaign reported in several weeks is
+  // added up across them (never split). A result for exactly the range is used on its own.
+  const fitting = rows.filter((r) => periodWithin({ start: r.period_start, end: r.period_end, granularity: r.granularity ?? "week" }, range));
+  const byCampaign = new Map<string, any[]>();
+  for (const r of fitting) byCampaign.set(r.id, [...(byCampaign.get(r.id) ?? []), r]);
+  const merged = [...byCampaign.values()].map((rs) => {
+    const exact = rs.filter((r) => r.period_start === range.start && r.period_end === range.end);
+    const use = exact.length ? exact : rs.filter((r) => r.granularity === "week").length ? rs.filter((r) => r.granularity === "week") : rs;
+    const last = use[use.length - 1];
+    const sumOf = (k: string) => { const f = sumFigs(use.map((r) => (r[k] === null ? missing() : fig(r[k])))); return f; };
+    const single = use.length === 1;
+    const attributions = [...new Set(use.map((r) => r.attribution ?? ""))], events = [...new Set(use.map((r) => r.acquisition_event))];
+    return { ...last, _spend: sumOf("spend"), _acq: sumOf("acquisitions"), _val: sumOf("conversion_value"),
+      reported_cpa: single ? last.reported_cpa : null, reported_roas: single ? last.reported_roas : null,
+      attribution: attributions.length === 1 ? attributions[0] || null : attributions.filter(Boolean).join("; "), acquisition_event: events.length === 1 ? events[0] : events.join("/"),
+      periods: use.map((r) => ({ start: r.period_start, end: r.period_end })) };
+  }).sort((a, b) => a.business_id.localeCompare(b.business_id) || a.platform.localeCompare(b.platform) || (b._spend.value ?? -1) - (a._spend.value ?? -1));
   const groups = new Map<string, any>();
-  for (const r of rows) {
+  for (const r of merged) {
+    r.spend = r._spend.value; r.acquisitions = r._acq.value; r.conversion_value = r._val.value;
     // Zero spend is not inactivity; zero-spend rows are hidden from performance tables unless explicitly included.
     if (!includeZero && (r.spend === 0 || r.spend === null) && !r.explicitly_included) continue;
     const key = `${r.business_id}|${r.platform}`;
     if (!groups.has(key)) groups.set(key, { business: r.business_id, platform: r.platform, campaigns: [] });
-    const spend: Fig = r.spend === null ? missing() : fig(r.spend);
-    const acq: Fig = r.acquisitions === null ? missing() : fig(r.acquisitions);
-    const val: Fig = r.conversion_value === null ? missing() : fig(r.conversion_value);
+    const spend: Fig = r._spend, acq: Fig = r._acq, val: Fig = r._val;
     groups.get(key).campaigns.push({
       id: r.id, name: r.name, status: r.current_status ?? "Unknown", statusObservedAt: r.status_observed_at,
       dailyBudget: r.daily_budget === null ? missing(r.budget_note ?? undefined) : { ...fig(r.daily_budget), ...(r.budget_note ? { note: r.budget_note } : {}) },
       spend, cpa: r.acquisitions === null && r.reported_cpa !== null ? { state: "value", value: r.reported_cpa, note: "As reported" } : purchaseCpa(spend, acq),
       roas: r.conversion_value === null && r.reported_roas !== null ? { state: "value", value: r.reported_roas, note: "As reported" } : ratio(val, spend),
-      acquisitionEvent: r.acquisition_event, attribution: r.attribution, explicitlyIncluded: r.explicitly_included, _acq: acq, _val: val,
+      acquisitionEvent: r.acquisition_event, attribution: r.attribution, explicitlyIncluded: r.explicitly_included, periods: r.periods, _acq: acq, _val: val,
     });
   }
   return [...groups.values()].map((g) => {
@@ -98,7 +115,9 @@ export async function advertising(b: string | null, range: DateRange, includeZer
       ? { spend, cpa: purchaseCpa(spend, sumFigs(g.campaigns.map((c: any) => c._acq))), roas: ratio(sumFigs(g.campaigns.map((c: any) => c._val)), spend) }
       : { spend, cpa: missing("Campaigns use different acquisition events or attribution"), roas: missing("Campaigns use different attribution") };
     g.campaigns.forEach((c: any) => { delete c._acq; delete c._val; });
-    return { ...g, totals, period: range };
+    const weeks = [...new Map(g.campaigns.flatMap((c: any) => c.periods).map((p: any) => [p.start + p.end, p])).values()].sort((a: any, b: any) => (a.start < b.start ? -1 : 1));
+    g.campaigns.forEach((c: any) => { delete c.periods; });
+    return { ...g, totals, period: range, reportedPeriods: weeks };
   });
 }
 

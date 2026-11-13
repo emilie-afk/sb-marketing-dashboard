@@ -7,6 +7,7 @@ import { query, one, tx } from "../db";
 import { badRequest, notFound, readJson, HttpError, json, forbidden } from "../http";
 import { isIsoDate, formatRange, todayIn, OPERATIONS_TZ } from "../../shared/dates";
 import { businessHeadline, advertising, productsAndVendors } from "./dashboard";
+import { periodWithin } from "../../shared/coverage";
 import { blobStore } from "../blobStore";
 import { audit } from "../audit";
 import { hit, subjectKey } from "../rateLimit";
@@ -53,7 +54,9 @@ export async function activitiesInPeriod(b: string | null, start: string, end: s
     `select a.business_id, a.activity_type, a.name, a.count::float8 count, a.count_unit, to_char(a.period_start,'YYYY-MM-DD') period_start,
             to_char(a.period_end,'YYYY-MM-DD') period_end, a.link, a.import_run_id
        from activities a where a.status = 'active' and ($1::text is null or a.business_id = $1)
-        and a.period_start >= $2 and a.period_end <= $3 order by a.period_start, a.name`, [b, start, end]);
+        and a.period_end >= $2 and a.period_start <= $3 order by a.period_start, a.name`, [b, start, end])
+    // Weekly work counts by its Mon–Fri working days, so a Saturday–Friday week belongs where its workdays are.
+    .then((rows: any[]) => rows.filter((a) => periodWithin({ start: a.period_start, end: a.period_end, granularity: "week" }, { start, end })));
 }
 
 /** Promotions that ran during the report period (overlapping it). No future window. */
@@ -77,10 +80,11 @@ export async function buildSnapshot(b: string | null, start: string, end: string
   const performance: any[] = [];
   for (const id of businesses) performance.push({ business: id, metrics: await businessHeadline(id, range, "previous_period") });
   const activities = await activitiesInPeriod(b, start, end);
-  const runs = await query<{ id: string }>(
-    `select distinct import_run_id as id from observations where status = 'active' and ($1::text is null or business_id = $1) and period_start >= $2 and period_end <= $3
-     union select distinct import_run_id from campaign_performance p join ad_campaigns c on c.id = p.campaign_id where p.status = 'active' and ($1::text is null or c.business_id = $1) and p.period_start = $2 and p.period_end = $3
-     union select distinct import_run_id from product_observations where status = 'active' and ($1::text is null or business_id = $1) and period_start = $2 and period_end = $3`, [b, start, end]);
+  const runs = (await query<{ id: string; s: string; e: string; g: string }>(
+    `select distinct import_run_id as id, to_char(period_start,'YYYY-MM-DD') s, to_char(period_end,'YYYY-MM-DD') e, granularity::text g from observations where status = 'active' and ($1::text is null or business_id = $1) and period_end >= $2 and period_start <= $3
+     union select distinct import_run_id, to_char(p.period_start,'YYYY-MM-DD'), to_char(p.period_end,'YYYY-MM-DD'), p.granularity::text from campaign_performance p join ad_campaigns c on c.id = p.campaign_id where p.status = 'active' and ($1::text is null or c.business_id = $1) and p.period_end >= $2 and p.period_start <= $3
+     union select distinct import_run_id, to_char(period_start,'YYYY-MM-DD'), to_char(period_end,'YYYY-MM-DD'), 'exact' from product_observations where status = 'active' and ($1::text is null or business_id = $1) and period_start = $2 and period_end = $3`, [b, start, end]))
+    .filter((x) => x.g === "exact" || periodWithin({ start: x.s, end: x.e, granularity: x.g }, range));
   const runIds = new Set([...runs.map((r) => r.id), ...activities.map((a: any) => a.import_run_id)].filter(Boolean));
   return {
     content: {

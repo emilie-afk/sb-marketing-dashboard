@@ -1,6 +1,6 @@
 // Pure rules: dates and comparisons, coverage, weighted ratios, value states, scope, recurrence, listing rules.
 import { describe, it, expect, beforeEach } from "vitest";
-import { comparisonPeriod, equivalentElapsed, shiftMonths } from "../shared/dates";
+import { comparisonPeriod, equivalentElapsed, shiftMonths, addDays } from "../shared/dates";
 import { resolveCoverage, latestRollingChecks } from "../shared/coverage";
 import { sumFigs, ratio, weightedRatio, purchaseCpa, change, fig, missing, notApplicable, formatChange, formatFig } from "../shared/metrics";
 import { totalWithBreakdown, dedupeTransactions, isExcludedBrand, rankingScopeLabel } from "../shared/scope";
@@ -42,6 +42,30 @@ describe("source date coverage", () => {
     const r = resolveCoverage({ start: "2026-10-20", end: "2026-10-26" }, weeks);
     expect(r.status).toBe("unsupported");
     expect((r as any).reason).toMatch(/never split/);
+  });
+  it("Saturday–Friday weeks count toward a month by their Mon–Fri working days", () => {
+    const satFri = ["2026-10-31", "2026-11-07", "2026-11-14", "2026-11-21", "2026-11-28"].map((s) => ({ start: s, end: addDays(s, 6), granularity: "week" as const }));
+    // The week Oct 31 – Nov 6 works Nov 2–6, so it belongs to November; its Saturday in October does not exclude it.
+    const nov = resolveCoverage({ start: "2026-11-01", end: "2026-11-30" }, satFri) as any;
+    expect(nov.status).toBe("gaps");
+    expect(nov.periods.map((p: any) => p.start)).toEqual(["2026-10-31", "2026-11-07", "2026-11-14", "2026-11-21"]);
+    expect(nov.missingDays).toEqual(["2026-11-30"]);   // Mon Nov 30 sits in the week Nov 28 – Dec 4, which is never split
+    expect(nov.note).toMatch(/1 working day/);
+    // A range covering every working day of its weeks is fully supported, even if weekend days fall outside it.
+    expect(resolveCoverage({ start: "2026-11-02", end: "2026-11-27" }, satFri).status).toBe("supported");
+    expect(resolveCoverage({ start: "2026-11-01", end: "2026-11-29" }, satFri).status).toBe("supported");
+    expect(resolveCoverage({ start: "2026-10-31", end: "2026-11-06" }, satFri).status).toBe("supported");
+    // December starts inside the Nov 28 – Dec 4 working week: those days are gaps, not split.
+    const dec = resolveCoverage({ start: "2026-12-01", end: "2026-12-31" }, satFri) as any;
+    expect(dec.status).toBe("unsupported");
+    // A weekend-only range or a range inside a single working week has no whole week to use.
+    expect(resolveCoverage({ start: "2026-11-07", end: "2026-11-08" }, satFri).status).toBe("unsupported");
+    expect(resolveCoverage({ start: "2026-11-03", end: "2026-11-05" }, satFri).status).toBe("unsupported");
+  });
+  it("Monday–Sunday weeks behave the same way", () => {
+    const monSun = [{ start: "2026-11-02", end: "2026-11-08", granularity: "week" as const }, { start: "2026-11-09", end: "2026-11-15", granularity: "week" as const }];
+    expect(resolveCoverage({ start: "2026-11-02", end: "2026-11-13" }, monSun).status).toBe("supported");
+    expect(resolveCoverage({ start: "2026-11-02", end: "2026-11-15" }, monSun).status).toBe("supported");
   });
   it("daily data supports arbitrary ranges and reports gaps", () => {
     const days = ["2026-10-01", "2026-10-02", "2026-10-04"].map((d) => ({ start: d, end: d, granularity: "day" as const }));

@@ -111,6 +111,7 @@ export function AdvertisingBlock({ platforms, showBusiness = true }: { platforms
           {ps.map((p) => (
             <details key={p.platform} open={!showBusiness}>
               <summary>{PLATFORM_NAMES[p.platform] ?? p.platform}: {p.campaigns.length} campaign{p.campaigns.length === 1 ? "" : "s"}</summary>
+              {p.reportedPeriods?.length > 1 && <p className="sub" style={{ margin: "4px 0 0" }}>Added up from weekly results: {p.reportedPeriods.map((r: any) => range(r)).join(", ")}. Budget/day is the latest reported.</p>}
               <div className="table-wrap" style={{ margin: "8px 0 12px" }}>
                 <table>
                   <thead><tr><th>Campaign name</th><th>Status</th><th className="n">Budget/day</th><th className="n">Cost</th><th className="n">CPA</th><th className="n">ROAS</th></tr></thead>
