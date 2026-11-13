@@ -102,10 +102,10 @@ function RegisterSheet({ onDone }: { onDone: () => void }) {
   const [msg, setMsg] = useState("");
   return <details style={{ marginTop: 10 }}><summary>Register a spreadsheet</summary>
     <form className="toolbar" style={{ marginTop: 8 }} onSubmit={async (e) => { e.preventDefault(); const f = Object.fromEntries(new FormData(e.currentTarget)) as any;
-      try { await api("/settings/sheet-sources", { method: "POST", json: { business_id: f.business_id, year: f.role === "intake" ? null : Number(f.year), role: f.role, label: f.label, file: f.file, file_kind: f.file_kind, sync_interval_minutes: Number(f.interval) } });
+      try { await api("/settings/sheet-sources", { method: "POST", json: { business_id: f.business_id, year: f.role === "annual_calendar" || f.role === "seasonal_program" ? Number(f.year) : null, role: f.role, label: f.label, file: f.file, file_kind: f.file_kind, sync_interval_minutes: Number(f.interval) } });
         setMsg("Registered. Use Refresh to read it now."); onDone(); } catch (x: any) { setMsg(x.message); } }}>
       <label>Label <input name="label" required placeholder="2027 annual calendar" /></label>
-      <label>Role <select name="role"><option value="annual_calendar">Annual calendar</option><option value="seasonal_program">Seasonal program</option><option value="intake">Intake (task results)</option></select></label>
+      <label>Role <select name="role"><option value="annual_calendar">Annual calendar</option><option value="seasonal_program">Seasonal program</option><option value="intake">Intake (task results)</option><option value="daily_analytics">Daily Analytics Report (daily revenue and orders)</option><option value="eos_scorecard">EOS scorecard (month totals)</option></select></label>
       <label>Business <select name="business_id">{Object.entries(BUSINESS_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
       <label>Year <input name="year" type="number" defaultValue={new Date().getFullYear()} style={{ width: 90 }} /></label>
       <label>Link <input name="file" required placeholder="Google Sheets or Drive link" style={{ minWidth: 260 }} /></label>

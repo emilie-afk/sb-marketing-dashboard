@@ -5,9 +5,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Router } from "../router";
 import { query, one, tx } from "../db";
 import { badRequest, notFound, readJson, HttpError, json, forbidden } from "../http";
-import { isIsoDate, formatRange, todayIn, OPERATIONS_TZ } from "../../shared/dates";
+import { isIsoDate, formatRange, todayIn, OPERATIONS_TZ, dayCount } from "../../shared/dates";
 import { businessHeadline, advertising, productsAndVendors } from "./dashboard";
-import { periodWithin } from "../../shared/coverage";
+import { periodWithin, overlapShare } from "../../shared/coverage";
 import { blobStore } from "../blobStore";
 import { audit } from "../audit";
 import { hit, subjectKey } from "../rateLimit";
@@ -48,15 +48,21 @@ export async function storeAttachment(owner_type: string, owner_id: string, file
 }
 
 /** Freezes the report content from current saved data, with the import runs it used. */
-/** Activities whose own period lies inside the report period (nothing earlier, nothing later). */
+/** Activities that overlap the report period; counts of periods running past it are prorated by days. */
 export async function activitiesInPeriod(b: string | null, start: string, end: string) {
   return query(
     `select a.business_id, a.activity_type, a.name, a.count::float8 count, a.count_unit, to_char(a.period_start,'YYYY-MM-DD') period_start,
             to_char(a.period_end,'YYYY-MM-DD') period_end, a.link, a.import_run_id
        from activities a where a.status = 'active' and ($1::text is null or a.business_id = $1)
         and a.period_end >= $2 and a.period_start <= $3 order by a.period_start, a.name`, [b, start, end])
-    // Weekly work counts by its Mon–Fri working days, so a Saturday–Friday week belongs where its workdays are.
-    .then((rows: any[]) => rows.filter((a) => periodWithin({ start: a.period_start, end: a.period_end, granularity: "week" }, { start, end })));
+    // Work counts for a period that runs past the report period are divided by the share of its days inside it
+    // (a Saturday–Friday week with 6 of its 7 days in November counts 6/7 of its tasks there).
+    .then((rows: any[]) => rows.flatMap((a) => {
+      const share = overlapShare({ start: a.period_start, end: a.period_end }, { start, end });
+      if (share <= 0) return [];
+      if (share === 1 || a.count === null) return [a];
+      return [{ ...a, count: Math.round(a.count * share * 10) / 10, prorated: { days_inside: Math.round(share * dayCount({ start: a.period_start, end: a.period_end })), days_total: dayCount({ start: a.period_start, end: a.period_end }), full_count: a.count } }];
+    }));
 }
 
 /** Promotions that ran during the report period (overlapping it). No future window. */

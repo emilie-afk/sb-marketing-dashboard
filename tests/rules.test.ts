@@ -1,7 +1,7 @@
 // Pure rules: dates and comparisons, coverage, weighted ratios, value states, scope, recurrence, listing rules.
 import { describe, it, expect, beforeEach } from "vitest";
 import { comparisonPeriod, equivalentElapsed, shiftMonths, addDays } from "../shared/dates";
-import { resolveCoverage, latestRollingChecks } from "../shared/coverage";
+import { resolveCoverage, latestRollingChecks, overlapShare } from "../shared/coverage";
 import { sumFigs, ratio, weightedRatio, purchaseCpa, change, fig, missing, notApplicable, formatChange, formatFig } from "../shared/metrics";
 import { totalWithBreakdown, dedupeTransactions, isExcludedBrand, rankingScopeLabel } from "../shared/scope";
 import { occurrences } from "../shared/recurrence";
@@ -43,29 +43,34 @@ describe("source date coverage", () => {
     expect(r.status).toBe("unsupported");
     expect((r as any).reason).toMatch(/never split/);
   });
-  it("Saturday–Friday weeks count toward a month by their Mon–Fri working days", () => {
+  it("weeks count toward a range only by their calendar days; a week running past it is a gap, never split", () => {
     const satFri = ["2026-10-31", "2026-11-07", "2026-11-14", "2026-11-21", "2026-11-28"].map((s) => ({ start: s, end: addDays(s, 6), granularity: "week" as const }));
-    // The week Oct 31 – Nov 6 works Nov 2–6, so it belongs to November; its Saturday in October does not exclude it.
     const nov = resolveCoverage({ start: "2026-11-01", end: "2026-11-30" }, satFri) as any;
     expect(nov.status).toBe("gaps");
-    expect(nov.periods.map((p: any) => p.start)).toEqual(["2026-10-31", "2026-11-07", "2026-11-14", "2026-11-21"]);
-    expect(nov.missingDays).toEqual(["2026-11-30"]);   // Mon Nov 30 sits in the week Nov 28 – Dec 4, which is never split
-    expect(nov.note).toMatch(/1 working day/);
-    // A range covering every working day of its weeks is fully supported, even if weekend days fall outside it.
-    expect(resolveCoverage({ start: "2026-11-02", end: "2026-11-27" }, satFri).status).toBe("supported");
-    expect(resolveCoverage({ start: "2026-11-01", end: "2026-11-29" }, satFri).status).toBe("supported");
+    // Oct 31 – Nov 6 has a day in October, so it isn't counted in November; nor is Nov 28 – Dec 4.
+    expect(nov.periods.map((p: any) => p.start)).toEqual(["2026-11-07", "2026-11-14", "2026-11-21"]);
+    expect(nov.missingDays).toEqual(["2026-11-01", "2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06", "2026-11-28", "2026-11-29", "2026-11-30"]);
+    expect(nov.note).toMatch(/9 days \(Nov 1 – 6, 2026, Nov 28 – 30, 2026\)|9 days/);
     expect(resolveCoverage({ start: "2026-10-31", end: "2026-11-06" }, satFri).status).toBe("supported");
-    // December starts inside the Nov 28 – Dec 4 working week: those days are gaps, not split.
-    const dec = resolveCoverage({ start: "2026-12-01", end: "2026-12-31" }, satFri) as any;
-    expect(dec.status).toBe("unsupported");
-    // A weekend-only range or a range inside a single working week has no whole week to use.
-    expect(resolveCoverage({ start: "2026-11-07", end: "2026-11-08" }, satFri).status).toBe("unsupported");
+    expect(resolveCoverage({ start: "2026-11-07", end: "2026-11-27" }, satFri).status).toBe("supported");
     expect(resolveCoverage({ start: "2026-11-03", end: "2026-11-05" }, satFri).status).toBe("unsupported");
   });
-  it("Monday–Sunday weeks behave the same way", () => {
-    const monSun = [{ start: "2026-11-02", end: "2026-11-08", granularity: "week" as const }, { start: "2026-11-09", end: "2026-11-15", granularity: "week" as const }];
-    expect(resolveCoverage({ start: "2026-11-02", end: "2026-11-13" }, monSun).status).toBe("supported");
-    expect(resolveCoverage({ start: "2026-11-02", end: "2026-11-15" }, monSun).status).toBe("supported");
+  it("month totals answer a whole month first, then daily figures, then whole weeks", () => {
+    const weeks = ["2026-10-31", "2026-11-07"].map((s) => ({ start: s, end: addDays(s, 6), granularity: "week" as const }));
+    const days = ["2026-11-01", "2026-11-02"].map((d) => ({ start: d, end: d, granularity: "day" as const }));
+    const months = [{ start: "2026-10-01", end: "2026-10-31", granularity: "month" as const }, { start: "2026-11-01", end: "2026-11-30", granularity: "month" as const }];
+    const oct = resolveCoverage({ start: "2026-10-01", end: "2026-10-31" }, [...weeks, ...months, ...days]) as any;
+    expect(oct).toMatchObject({ status: "supported", granularity: "month" });
+    expect(resolveCoverage({ start: "2026-10-01", end: "2026-11-30" }, months)).toMatchObject({ status: "supported", granularity: "month" });
+    expect(resolveCoverage({ start: "2026-11-01", end: "2026-11-02" }, [...weeks, ...months, ...days])).toMatchObject({ status: "supported", granularity: "day" });
+    // Part of a month with only weekly totals: whole weeks inside the range, the rest reported as gaps.
+    expect(resolveCoverage({ start: "2026-11-07", end: "2026-11-13" }, [...weeks, ...months])).toMatchObject({ status: "supported", granularity: "week" });
+  });
+  it("work counts of a period running past the range are prorated by its days", () => {
+    expect(overlapShare({ start: "2026-10-31", end: "2026-11-06" }, { start: "2026-11-01", end: "2026-11-30" })).toBeCloseTo(6 / 7);
+    expect(overlapShare({ start: "2026-10-31", end: "2026-11-06" }, { start: "2026-10-01", end: "2026-10-31" })).toBeCloseTo(1 / 7);
+    expect(overlapShare({ start: "2026-11-07", end: "2026-11-13" }, { start: "2026-11-01", end: "2026-11-30" })).toBe(1);
+    expect(overlapShare({ start: "2026-12-05", end: "2026-12-11" }, { start: "2026-11-01", end: "2026-11-30" })).toBe(0);
   });
   it("daily data supports arbitrary ranges and reports gaps", () => {
     const days = ["2026-10-01", "2026-10-02", "2026-10-04"].map((d) => ({ start: d, end: d, granularity: "day" as const }));
@@ -222,5 +227,20 @@ describe("spreadsheet date text", () => {
     expect(parseDateText("Nov 27 / Nov 30, 2026", 2026)).toMatchObject({ multiple: ["2026-11-27", "2026-11-30"] });
     expect(parseDateText("Existing baseline offer period", 2026).ok).toBe(false);
     expect(parseDateText("Feb 30", 2026).ok).toBe(false);
+  });
+});
+
+describe("Daily Analytics Report and EOS scorecard layouts", () => {
+  it("reads month tabs with irregular spacing and leaves out months that haven't ended", async () => {
+    const { monthTab, parseEosMonths, amount } = await import("../shared/scorecardParse");
+    expect(monthTab("October  2026")).toEqual({ y: 2026, m: 10 });
+    expect(monthTab("Sep 2024")).toEqual({ y: 2024, m: 9 });
+    expect(monthTab("Summary")).toBeNull();
+    expect(amount("$1,389.62")).toBe(1389.62);
+    expect(amount("No data")).toBeNull();
+    expect(amount("#DIV/0!")).toBeNull();
+    const sheet = { name: "2026", rows: [[], [], [null, null, "OCT 1-31", "NOV 1-30"], [null, null, "TOTAL (MONTH)", "TOTAL (MONTH)"], ["Revenue", "All", 100, 50], ["Ads Spent", "Google Ads SB", 10, null], [null, "Total Ad spent (Succulents Box)", 10, 0]] };
+    const out = parseEosMonths([sheet], { today: "2026-11-13" });
+    expect(out.map((b) => b.month)).toEqual(["2026-10"]);       // November's column isn't final until the month ends
   });
 });

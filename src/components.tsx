@@ -165,7 +165,7 @@ export function WorkBlock({ work }: { work: any }) {
 export function ActivityList({ items }: { items: any[] }) {
   return <ul className="list">{items.map((a: any, i: number) => (
     <li key={i}><b>{a.name}</b>{a.count !== null && a.count !== undefined && <span>: {a.count} {a.count_unit}</span>}
-      <div className="sub">{range({ start: a.period_start, end: a.period_end })}{a.link && <> · <a href={a.link} target="_blank" rel="noreferrer">link</a></>}</div></li>))}</ul>;
+      <div className="sub">{range({ start: a.period_start, end: a.period_end })}{a.prorated && <> · {a.prorated.days_inside} of its {a.prorated.days_total} days in this period, so {a.count} of {a.prorated.full_count} counted</>}{a.link && <> · <a href={a.link} target="_blank" rel="noreferrer">link</a></>}</div></li>))}</ul>;
 }
 
 export function ProductsBlock({ p, onVendor }: { p: any; onVendor?: (id: string) => void }) {

@@ -81,7 +81,15 @@ export async function metricValue(business: string, key: string, scope: string, 
     const g = grossMarginFromRows(await marginRows(business, scope, range), range);
     return { key, label: d.label, unit: d.unit, value: g.value, coverage: g.coverage, timezone: g.timezone, covered: g.covered };
   }
-  const rows = await observationsFor(business, [d.numerator!, d.denominator!], scope, range);
+  const rows = await observationsFor(business, [d.numerator!, d.denominator!, key], scope, range);
+  // A rate reported for exactly this month (the EOS scorecard's month column) is used as reported: its counts are
+  // only stored by week, and a week running past the month is never split.
+  const monthRate = rows.filter((r) => r.metric_key === key && r.granularity === "month" && r.period_start === range.start && r.period_end === range.end);
+  if (monthRate.length === 1 && key !== "cpa" && key !== "roas") {
+    const r = monthRate[0];
+    const value = withCompleteness({ state: r.value_state, value: r.value, note: "Month figure from the EOS scorecard" }, [r.completeness]);
+    return { key, label: d.label, unit: d.unit, value, coverage: { status: "supported", granularity: "month", periods: [{ start: r.period_start, end: r.period_end, granularity: "month" }], partial: false }, timezone: r.timezone, covered: range };
+  }
   const n = baseTotal(rows, d.numerator!, range), m = baseTotal(rows, d.denominator!, range);
   const value = key === "cpa" ? purchaseCpa(n.value, m.value) : ratio(n.value, m.value);
   return { key, label: d.label, unit: d.unit, value, coverage: n.coverage.status !== "supported" ? n.coverage : m.coverage, timezone: n.timezone ?? m.timezone, covered: n.covered };

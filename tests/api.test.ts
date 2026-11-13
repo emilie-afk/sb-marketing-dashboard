@@ -101,33 +101,85 @@ describe("periods through the API", () => {
   });
 });
 
-describe("Mon–Fri working weeks across a month", () => {
+describe("calendar-day counting across a month", () => {
+  // April 2025: Saturday–Friday weeks Mar 29 – Apr 4 and Apr 26 – May 2 run past the month; three weeks lie inside it.
   const satFri = (s: string) => ({ start: s, end: new Date(Date.parse(`${s}T00:00:00Z`) + 6 * 864e5).toISOString().slice(0, 10) });
-  it("counts Saturday–Friday weekly figures, campaigns and activities toward the month their working days fall in", async () => {
-    const weeks = ["2027-01-30", "2027-02-06", "2027-02-13", "2027-02-20"].map(satFri);   // Feb 2027: Jan 30 – Feb 5 works Feb 1–5
+  const weeks = ["2025-03-29", "2025-04-05", "2025-04-12", "2025-04-19", "2025-04-26"].map(satFri);
+  const apr = { start: "2025-04-01", end: "2025-04-30" };
+  // EOS scorecard layout: row 3 month labels, row 4 column headers, labels in columns A and B.
+  const eos = (aprAll: number | null, fb = 150) => [{ name: "2025", rows: [[], [], [null, null, null, "APR 1-30", null, "MAY 1-31"], ["METRICS", null, "Apr 19 - 25", "TOTAL (MONTH) - Adjusted for Amazon Shipping", "Apr 26 - May 2", "TOTAL (MONTH) - Adjusted for Amazon Shipping"],
+    ["Revenue", "All", 1, aprAll, 1, null], [null, "Shopify (Website)", 1, 8000, 1, null], [null, "Amazon (w/o shipping)", 1, 1000, 1, null], [null, "Faire", 1, 300, 1, null],
+    [null, "Little Sunnie", 1, 0, 1, null], [null, "Photostosketches", 1, 500, 1, null],
+    ["Conversion rate (adjusted)\nSucculents Box", "Added to cart", 0.04, 0.05, 0.04, null], [null, "Reached check out", 0.02, 0.03, 0.02, null], [null, "Converted", 0.008, 0.01, 0.008, null],
+    ["Human vs Bot", "Bot checkout/ Human check out rate", 0.01, null, 0.01, null],
+    ["Ads Spent", "Google Ads SB", 90, 400, 90, null], [null, "Facebook Ads SB", 30, fb, 30, null], [null, "Total Ad spent (Succulents Box)", 120, 400 + fb, 120, 0], [null, "Photostosketches", 20, 90, 20, null]] }];
+  // Daily Analytics Report layout: two columns per day (revenue, orders), channel labels in column A.
+  const dar = (web1 = 100) => [{ name: "April 2025", rows: [["Z5"], [], [null, 1, null, 2, null, 3, null, 4],
+    ["Website", web1, 5, 110, 6, 120, 7], ["Ebay", 0, 0, 0, 0, 0, 0], ["Amazon (not plus shipping)", 20, 1, 30, 2, 0, 0], ["Cratejoy", 0, 0, 45, null, 0, 0], ["Faire (BPF)", 0, 0, 0, 0, 80, 1],
+    ["Little Sunnie"], ["Website", 999, 9, 999, 9, 999, 9], ["Photostosketches"], ["Etsy", 40, 2, 0, 0, 25, 1], ["KDP", null, null, null, null, null, null],
+    ["Total", 9999, 99, 9999, 99, 9999, 99]] }];
+  let eosSrc = "", darSrc = "";
+
+  it("counts weeks only inside the month, then uses the EOS month totals and daily figures", async () => {
     for (const [i, w] of weeks.entries()) {
-      await submit({ ...envelope(`ww-${i}`, "sb", w), records: { observations: [{ metric: "revenue", value: 100 * (i + 1) }, { metric: "orders", value: 10 }],
-        campaigns: [{ platform: "facebook", external_id: "120001", name: "New Sales Campaign - All products", spend: 10, acquisitions: 1, conversion_value: 30, daily_budget: 20 + i },
-          { platform: "facebook", external_id: "120002", name: "New Sales Campaign - All products", spend: 5, acquisitions: 0, conversion_value: 0 }],
-        activities: [{ type: "social", name: "Weekly posts (working-week test)", count: 3, count_unit: "posts" }] } });
+      await submit({ ...envelope(`cal-${i}`, "sb", w), records: { observations: [{ metric: "revenue", value: 1000 }, { metric: "orders", value: 10 }, { metric: "ad_spend", value: 100 },
+        { metric: "sessions", value: 1000 }, { metric: "sessions_converted", value: 9 }],
+        campaigns: [{ platform: "facebook", external_id: "130001", name: "Calendar test", spend: 30, acquisitions: 1, conversion_value: 60 }],
+        activities: [{ type: "social", name: "Daily posts (calendar test)", count: 7, count_unit: "posts" }] } });
     }
-    const feb = { start: "2027-02-01", end: "2027-02-28" };
-    const sum = await call("viewer", "GET", `/business/sb/summary?start=${feb.start}&end=${feb.end}&compare=previous_period`);
-    const rev = sum.body.metrics.find((m: any) => m.key === "revenue");
-    expect(rev.value).toMatchObject({ state: "value", value: 1000 });   // all four weeks; Feb 2027 has no working day outside them
-    expect(rev.coverage.status).toBe("supported");
-    const ads = (await call("viewer", "GET", `/business/sb/advertising?start=${feb.start}&end=${feb.end}`)).body.platforms.find((p: any) => p.platform === "facebook");
-    // Two campaigns share a name but keep their own identity, each added up across the four weeks.
-    expect(ads.campaigns.map((c: any) => [c.name, c.spend.value])).toEqual([["New Sales Campaign - All products", 40], ["New Sales Campaign - All products", 20]]);
-    expect(ads.campaigns[0].dailyBudget.value).toBe(23);
-    expect(ads.reportedPeriods).toHaveLength(4);
-    expect(ads.totals.spend.value).toBe(60);
-    // The report snapshot picks up the weekly activities by their working days too.
+    // Weekly figures only: the three weeks inside April count; the days of the two weeks running past it are a gap.
+    let rev = (await call("viewer", "GET", `/business/sb/summary?start=${apr.start}&end=${apr.end}&compare=previous_period`)).body.metrics.find((m: any) => m.key === "revenue");
+    expect(rev.value).toMatchObject({ state: "incomplete", value: 3000 });
+    expect(rev.coverage.missingDays).toEqual(["2025-04-01", "2025-04-02", "2025-04-03", "2025-04-04", "2025-04-26", "2025-04-27", "2025-04-28", "2025-04-29", "2025-04-30"]);
+    let fb = (await call("viewer", "GET", `/business/sb/advertising?start=${apr.start}&end=${apr.end}`)).body.platforms.find((p: any) => p.platform === "facebook");
+    expect(fb.campaigns[0].spend).toMatchObject({ state: "incomplete", value: 90 });
+    expect(fb.campaigns[0].spend.note).toMatch(/Mar 29 to Apr 4, 2025.*Apr 26 to May 2, 2025.*not included/);
+    // Completed work: a week running past April counts by the share of its days inside it.
     const { activitiesInPeriod } = await import("../server/routes/reports");
-    expect((await activitiesInPeriod("sb", feb.start, feb.end)).filter((a: any) => a.name.startsWith("Weekly posts")).length).toBe(4);
-    // March starts inside no reported week: nothing from February spills into it.
-    const mar = (await call("viewer", "GET", `/business/sb/summary?start=2027-03-01&end=2027-03-31&compare=previous_period`)).body.metrics.find((m: any) => m.key === "revenue");
-    expect(mar.value.state).toBe("missing");
+    const acts = (await activitiesInPeriod("sb", apr.start, apr.end)).filter((a: any) => a.name.startsWith("Daily posts"));
+    expect(acts.map((a: any) => a.count)).toEqual([4, 7, 7, 7, 5]);
+    expect(acts[0].prorated).toEqual({ days_inside: 4, days_total: 7, full_count: 7 });
+
+    // The EOS scorecard's April column: month totals replace the weekly sum for the whole month.
+    eosSrc = (await q("insert into sheet_sources (business_id, role, label, file_id, file_kind, created_by) values ('sb', 'eos_scorecard', 'EOS', 'TESTeosFILEid0000000000001', 'google_sheet', 't') returning id"))[0].id;
+    const r1 = await runSheetSync(eosSrc, "manual", "t", async () => eos(10000) as any);
+    expect(r1.outcome).toBe("succeeded");
+    const sum = (await call("viewer", "GET", `/business/sb/summary?start=${apr.start}&end=${apr.end}&compare=previous_period`)).body.metrics;
+    rev = sum.find((m: any) => m.key === "revenue");
+    expect(rev.value).toMatchObject({ state: "value", value: 9500 });       // All − Little Sunnie − Photostosketches
+    expect(rev.coverage).toMatchObject({ status: "supported", granularity: "month" });
+    expect(sum.find((m: any) => m.key === "ad_spend").value).toMatchObject({ state: "value", value: 550 });
+    expect(sum.find((m: any) => m.key === "conversion_rate").value).toMatchObject({ state: "value", value: 0.01 });
+    const { metricValue } = await import("../server/metricQuery");
+    expect((await metricValue("p2s", "revenue", "all", apr)).value.value).toBe(500);
+    expect((await metricValue("p2s", "ad_spend", "all", apr)).value.value).toBe(90);
+    expect((await metricValue("sb", "revenue", "channel:amazon", apr)).value.value).toBe(1000);
+    // May has not been filled in (its total ad spend formula shows 0): nothing is sent for it.
+    expect((await q("select count(*)::int n from observations where source_id = 'sheet.eos_scorecard' and period_start = '2025-05-01'"))[0].n).toBe(0);
+    // The platform total uses the month figure; CPA/ROAS are withheld because two campaign weeks are left out.
+    fb = (await call("viewer", "GET", `/business/sb/advertising?start=${apr.start}&end=${apr.end}`)).body.platforms.find((p: any) => p.platform === "facebook");
+    expect(fb.totals.spend).toMatchObject({ state: "value", value: 150, note: "Month total from the EOS scorecard" });
+    expect(fb.totals.roas.state).toBe("missing");
+    // Unchanged spreadsheet: nothing written. A changed figure is a correction of that month.
+    expect((await runSheetSync(eosSrc, "manual", "t", async () => eos(10000) as any) as any).receipts.every((r: any) => r.outcome === "unchanged")).toBe(true);
+    await runSheetSync(eosSrc, "manual", "t", async () => eos(10000, 175) as any);
+    expect((await metricValue("sb", "ad_spend", "platform:facebook", apr)).value.value).toBe(175);
+
+    // The Daily Analytics Report: exact figures for any days, Little Sunnie left out.
+    darSrc = (await q("insert into sheet_sources (business_id, role, label, file_id, file_kind, created_by) values ('sb', 'daily_analytics', 'DAR', 'TESTdarFILEid0000000000001', 'google_sheet', 't') returning id"))[0].id;
+    expect((await runSheetSync(darSrc, "manual", "t", async () => dar() as any)).outcome).toBe("succeeded");
+    const d13 = { start: "2025-04-01", end: "2025-04-03" };
+    expect((await metricValue("sb", "revenue", "all", d13)).value).toMatchObject({ state: "value", value: 100 + 20 + 110 + 30 + 45 + 120 + 80 });
+    expect((await metricValue("sb", "orders", "all", d13)).value.value).toBe(5 + 1 + 6 + 2 + 7 + 1);      // Cratejoy's blank order count adds nothing
+    expect((await metricValue("sb", "revenue", "channel:online_store", d13)).value.value).toBe(330);
+    expect((await metricValue("p2s", "revenue", "all", d13)).value.value).toBe(65);
+    // Day 4 has no figures yet; the whole month still comes from the EOS total.
+    expect((await metricValue("sb", "revenue", "all", { start: "2025-04-01", end: "2025-04-04" })).coverage.status).toBe("gaps");
+    expect((await metricValue("sb", "revenue", "all", apr)).value.value).toBe(9500);
+    const notes = (await q("select tabs_read from sync_runs where sheet_source_id = $1 order by started_at desc limit 1", [darSrc]))[0].tabs_read;
+    expect(JSON.stringify(notes)).toMatch(/2025-04-02: no order count for Cratejoy/);
+    await runSheetSync(darSrc, "manual", "t", async () => dar(105) as any);
+    expect((await metricValue("sb", "revenue", "channel:online_store", d13)).value.value).toBe(335);
   });
 });
 

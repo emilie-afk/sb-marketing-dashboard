@@ -4,7 +4,7 @@ import type { Router } from "../router";
 import { trackerWorkRows } from "../trackerTasks";
 import { query, one } from "../db";
 import { badRequest, notFound } from "../http";
-import { compared, trend, metricDefs } from "../metricQuery";
+import { compared, trend, metricDefs, metricValue } from "../metricQuery";
 import { DateRange, isIsoDate, addDays, comparisonPeriod, ComparisonKind, todayIn, OPERATIONS_TZ, formatRange } from "../../shared/dates";
 import { Fig, fig, missing, notApplicable, sumFigs, ratio, purchaseCpa, change } from "../../shared/metrics";
 import { rankingScopeLabel, totalWithBreakdown, trackedChannels } from "../../shared/scope";
@@ -74,9 +74,12 @@ export async function advertising(b: string | null, range: DateRange, includeZer
        from ad_campaigns c join campaign_performance p on p.campaign_id = c.id and p.status = 'active'
       where ($1::text is null or c.business_id = $1) and p.period_end >= $2 and p.period_start <= $3
       order by c.business_id, c.platform, p.period_start`, [b, range.start, range.end]);
-  // Weekly results count toward the range by their Mon–Fri working days; a campaign reported in several weeks is
-  // added up across them (never split). A result for exactly the range is used on its own.
-  const fitting = rows.filter((r) => periodWithin({ start: r.period_start, end: r.period_end, granularity: r.granularity ?? "week" }, range));
+  // Weekly results count toward the range only when all their days are inside it; a campaign reported in several
+  // weeks is added up across them. A week running past the range is never split: the campaign's figures are marked
+  // incomplete and say which week was left out. A result for exactly the range is used on its own.
+  const fitting = rows.filter((r) => periodWithin({ start: r.period_start, end: r.period_end }, range));
+  const outside = new Map<string, { start: string; end: string }[]>();
+  for (const r of rows) if (!periodWithin({ start: r.period_start, end: r.period_end }, range)) outside.set(r.id, [...(outside.get(r.id) ?? []), { start: r.period_start, end: r.period_end }]);
   const byCampaign = new Map<string, any[]>();
   for (const r of fitting) byCampaign.set(r.id, [...(byCampaign.get(r.id) ?? []), r]);
   const merged = [...byCampaign.values()].map((rs) => {
@@ -93,9 +96,16 @@ export async function advertising(b: string | null, range: DateRange, includeZer
     const single = use.length === 1;
     const attributions = [...new Set(use.map((r) => r.attribution ?? ""))], events = [...new Set(use.map((r) => r.acquisition_event))];
     const mixed = attributions.length > 1 || events.length > 1;
-    const spendFig = sumOf("spend");
-    return { ...last, _spend: overlapped && spendFig.value !== null ? { ...spendFig, state: "incomplete", note: "Some reported periods overlap; each day is counted once" } : spendFig,
-      _acq: sumOf("acquisitions"), _val: sumOf("conversion_value"), mixed,
+    let spendFig: Fig = sumOf("spend"), acqFig: Fig = sumOf("acquisitions"), valFig: Fig = sumOf("conversion_value");
+    if (overlapped && spendFig.value !== null) spendFig = { ...spendFig, state: "incomplete", note: "Some reported periods overlap; each day is counted once" };
+    const left = exact.length ? [] : (outside.get(last.id) ?? []);
+    if (left.length) {
+      const note = `${left.map((p) => formatRange(p)).join(", ")} ${left.length === 1 ? "runs" : "run"} past this period and ${left.length === 1 ? "is" : "are"} not included (weekly results are never split)`;
+      const inc = (f: Fig): Fig => (f.value === null ? f : { ...f, state: "incomplete", note });
+      spendFig = inc(spendFig); acqFig = inc(acqFig); valFig = inc(valFig);
+    }
+    return { ...last, _spend: spendFig,
+      _acq: acqFig, _val: valFig, mixed,
       reported_cpa: single ? last.reported_cpa : null, reported_roas: single ? last.reported_roas : null,
       attribution: attributions.length === 1 ? attributions[0] || null : attributions.filter(Boolean).join("; "), acquisition_event: events.length === 1 ? events[0] : events.join("/"),
       periods: use.map((r) => ({ start: r.period_start, end: r.period_end })) };
@@ -119,13 +129,25 @@ export async function advertising(b: string | null, range: DateRange, includeZer
       acquisitionEvent: r.acquisition_event, attribution: r.attribution, explicitlyIncluded: r.explicitly_included, periods: r.periods, _acq: acq, _val: val,
     });
   }
+  // Exact month totals per platform (the EOS scorecard's month columns) replace the sum of whole weeks.
+  for (const g of groups.values()) {
+    const m = await metricValue(g.business, "ad_spend", `platform:${g.platform}`, range);
+    if (m.coverage.status === "supported" && (m.coverage.granularity === "month" || m.coverage.granularity === "day") && m.value.value !== null) g.monthSpend = { ...m.value, note: m.coverage.granularity === "month" ? "Month total from the EOS scorecard" : m.value.note };
+  }
   return [...groups.values()].map((g) => {
     // Platform totals only when every campaign shares the same acquisition event and attribution.
     const events = new Set(g.campaigns.map((c: any) => `${c.acquisitionEvent}|${c.attribution ?? ""}`));
-    const spend = sumFigs(g.campaigns.map((c: any) => c.spend));
-    const totals = events.size === 1 && !g.campaigns.some((c: any) => c.mixed)
+    const campSpend = sumFigs(g.campaigns.map((c: any) => c.spend));
+    const spend: Fig = g.monthSpend ?? campSpend;
+    // CPA and ROAS need purchases for the same days as the spend: with a month total but campaign weeks left out,
+    // they are withheld rather than mixing a full month of spend with part of its purchases.
+    const sameDays = !g.monthSpend || campSpend.state === "value";
+    const totals = !sameDays
+      ? { spend, cpa: missing("Purchases are reported by week; a week running past this period is not included"), roas: missing("Purchases are reported by week; a week running past this period is not included") }
+      : events.size === 1 && !g.campaigns.some((c: any) => c.mixed)
       ? { spend, cpa: purchaseCpa(spend, sumFigs(g.campaigns.map((c: any) => c._acq))), roas: ratio(sumFigs(g.campaigns.map((c: any) => c._val)), spend) }
       : { spend, cpa: missing("Campaigns use different acquisition events or attribution"), roas: missing("Campaigns use different attribution") };
+    delete g.monthSpend;
     g.campaigns.forEach((c: any) => { delete c._acq; delete c._val; delete c.mixed; });
     const weeks = [...new Map(g.campaigns.flatMap((c: any) => c.periods).map((p: any) => [p.start + p.end, p])).values()].sort((a: any, b: any) => (a.start < b.start ? -1 : 1));
     g.campaigns.forEach((c: any) => { delete c.periods; });
