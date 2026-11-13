@@ -131,6 +131,26 @@ describe("Mon–Fri working weeks across a month", () => {
   });
 });
 
+describe("campaign results across weeks", () => {
+  it("never counts overlapping periods twice and withholds CPA/ROAS across different definitions", async () => {
+    const w1 = { start: "2027-04-03", end: "2027-04-09" }, w2 = { start: "2027-04-10", end: "2027-04-16" }, wOverlap = { start: "2027-04-05", end: "2027-04-11" };
+    const camp = (spend: number, extra: any = {}) => ({ platform: "google", external_id: "777", name: "Overlap test", spend, acquisitions: 2, conversion_value: 60, ...extra });
+    await submit({ ...envelope("ov-1", "sb", w1), source: "ads", records: { campaigns: [camp(10), { platform: "google", external_id: "888", name: "Mixed defs", spend: 10, acquisitions: 1, conversion_value: 30, attribution: "7-day click" }] } });
+    await submit({ ...envelope("ov-2", "sb", w2), source: "ads", records: { campaigns: [camp(20), { platform: "google", external_id: "888", name: "Mixed defs", spend: 10, acquisitions: 1, conversion_value: 30, attribution: "1-day click" }] } });
+    await submit({ ...envelope("ov-3", "sb", wOverlap), source: "ads", records: { campaigns: [camp(99)] } });
+    const g = (await call("viewer", "GET", "/business/sb/advertising?start=2027-04-01&end=2027-04-30")).body.platforms.find((p: any) => p.platform === "google");
+    const ov = g.campaigns.find((c: any) => c.name === "Overlap test");
+    expect(ov.spend.value).toBe(30);   // Apr 3–9 and Apr 10–16; the overlapping Apr 5–11 result is not added on top
+    expect(ov.spend.state).toBe("incomplete");
+    const mixed = g.campaigns.find((c: any) => c.name === "Mixed defs");
+    expect(mixed.spend.value).toBe(20);
+    expect(mixed.cpa.state).toBe("missing");
+    expect(mixed.roas.state).toBe("missing");
+    expect(g.totals.cpa.state).toBe("missing");
+    expect(g.totals.roas.state).toBe("missing");
+  });
+});
+
 describe("advertising", () => {
   it("hides zero-spend campaigns unless included, and has no total row in campaign tables", async () => {
     await submit({ ...envelope("ads-1", "sb", week), source: "ads", records: { campaigns: [
