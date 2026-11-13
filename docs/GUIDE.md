@@ -78,11 +78,19 @@ Spreadsheet sync is one-way. Precedence when two sheets describe the same promot
 - Ownership: each record carries the person who owned the task on that record's date, so completed work stays credited to its original owner after reassignment or archival.
 - Access: tracker membership grants nothing here (only `TEAM_MEMBERS` does), and a Management role in the tracker does not change dashboard roles.
 
+### Marketing Tasks views
+
+- Views: Needs attention (default; open tasks overdue or due today, grouped Overdue/Today), This week (Monday–Sunday), Upcoming (after this week, 4 weeks at a time), Completed (by completion date, due date as a labelled fallback), All tasks (includes undated; cancelled only through the Status filter). Dates are Vietnam calendar dates.
+- `GET /api/tasks?view=…` builds every task row first (one-off tasks, each recurring occurrence with its own assignee and status, and Task Tracker records) and then applies the filters (`business`, `assignee` with `__unassigned__`, `q`, `status`, `activity`, `source`, `kind`, `from`, `to`), so both sources follow the same filters and List and Board show the same results. Without `view` the endpoint keeps its earlier behaviour.
+- The view and filters live in the URL (`#/tasks?view=this_week&business=sb&assignee=…`), so a view can be bookmarked and Back returns to it; opening a task adds `task=` to the URL, and a recurring occurrence also adds its date (`occ=YYYY-MM-DD`), so each occurrence has its own link. Its drawer (`GET /api/tasks/:id?occurrence=YYYY-MM-DD`) shows that occurrence's assignee, status and due date; status changes there apply to that occurrence only, while links, files and updates belong to the whole routine.
+- Task Tracker occurrences are only available for the window of the latest snapshot; the page says so when the selected range starts earlier.
+
 ### Gift calendar
 
 - Occasions live in `shared/giftCalendar.ts` (stable ids, date rules, gift themes, lead-ins, applicable brands) and are seeded into `gift_occasions` after every `db:migrate`. The seed is safe to rerun: occasions are updated in place by id, so promotion links survive; per-year overrides are only inserted when missing.
 - Dated occasions are placed for the years being viewed as all-day dates (no clock time), so they show on the same day in Vietnam and U.S. time zones. Seasonal windows (multi-week) can be hidden on the Calendar; a lead-in month is shown in the details, never as the window itself. Teacher Appreciation Day is listed inside Teacher Appreciation Week. An occasion with organizer-set dates and no override for a year shows "<Month>, dates to be confirmed".
 - Year-round occasions appear only in the promotion picker; their promotions place them on the Calendar.
+- The Calendar opens on **Upcoming occasions** (`GET /api/occasions/agenda`): gift and spreadsheet occasions for the next 90 days by month, seasonal windows already in progress, unconfirmed dates under their month, lead-ins on the row, and linked promotions. The month grid's "+ more" opens the full list for that day. View and filters are kept in the URL.
 - A promotion's link stores the occasion and, for dated occasions, the occurrence year (so a December campaign can lead into next year's occasion). Year-round links have no year. The link is a dashboard field: spreadsheet sync never writes it, and linking or clearing it leaves the rest of the promotion unchanged.
 - Permissions follow the existing roles: viewers see everything permitted; editors and admins create dashboard promotions and change links (the server answers `403` to viewers).
 - To add a confirmed date for a year (e.g. National Volunteer Week), add it to `GIFT_OVERRIDES` and run `db:migrate`, or insert a row into `gift_occasion_overrides`.

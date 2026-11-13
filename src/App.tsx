@@ -24,7 +24,7 @@ function useHash() {
 export function App() {
   const me = useApi<any>("/me");
   const hash = useHash();
-  const [section, sub] = hash.split("/");
+  const [section, sub] = hash.split("?")[0].split("/");
   const [period, setPeriod] = useState<Period>(null);
 
   if (me.loading) return <div className="shell"><div className="state">Loading…</div></div>;
