@@ -1,15 +1,35 @@
-import { useState } from "react";
-import { useApi, Async, Tabs, BUSINESS_NAMES, api, Drawer, when } from "../lib";
+import { useState, useEffect, useRef } from "react";
+import { useApi, Async, BUSINESS_NAMES, api, Drawer, when, useHashQuery } from "../lib";
 
 const STATUSES: [string, string][] = [["todo", "To do"], ["in_progress", "In progress"], ["waiting", "Waiting"], ["done", "Done"]];
 
+const VIEWS: [string, string][] = [["needs_attention", "Needs attention"], ["this_week", "This week"], ["upcoming", "Upcoming"], ["completed", "Completed"], ["all", "All tasks"]];
+const STATUS_LABEL: Record<string, string> = { todo: "To do", in_progress: "In progress", waiting: "Waiting", done: "Done", cancelled: "Cancelled" };
+const UNASSIGNED = "__unassigned__";
+const FILTER_KEYS = ["q", "business", "assignee", "status", "activity", "source", "kind", "from", "to"];
+const dayNum = (d: string) => Date.parse(`${d}T00:00:00Z`) / 864e5;
+const shortDate = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+
+/** "Today", "Tomorrow", "3 days overdue", "In 5 days", always next to the actual date. */
+export function deadlineLabel(due: string | null, today: string, status: string) {
+  if (!due) return { text: "No due date", tone: "" };
+  const diff = dayNum(due) - dayNum(today), open = status !== "done" && status !== "cancelled";
+  const rel = diff === 0 ? "Today" : diff === 1 ? "Tomorrow" : diff === -1 ? (open ? "1 day overdue" : "Yesterday") : diff < 0 ? (open ? `${-diff} days overdue` : `${-diff} days ago`) : `In ${diff} days`;
+  return { text: `${rel} · ${shortDate(due)}`, tone: open && diff < 0 ? "bad" : open && diff === 0 ? "warn" : "" };
+}
+
 export function TasksPage({ role }: { role: string }) {
-  const [view, setView] = useState("list");
-  const [business, setBusiness] = useState("");
-  const [owner, setOwner] = useState("");
-  const [open, setOpen] = useState<string | null>(null);
+  const [q, setQ] = useHashQuery();
+  const view = VIEWS.some(([k]) => k === q.get("view")) ? q.get("view")! : "needs_attention";
+  const layout = q.get("layout") === "board" ? "board" : "list";
+  const openId = q.get("task");
   const [creating, setCreating] = useState(false);
-  const s = useApi<any>(`/tasks?${business ? `business=${business}&` : ""}${owner ? `owner=${encodeURIComponent(owner)}` : ""}`, [business, owner]);
+  const [search, setSearch] = useState(q.get("q") ?? "");
+  useEffect(() => { setSearch(q.get("q") ?? ""); }, [q.get("q")]);
+  useEffect(() => { const t = setTimeout(() => { if ((q.get("q") ?? "") !== search) setQ({ q: search || null }); }, 300); return () => clearTimeout(t); }, [search]);
+  const apiQuery = new URLSearchParams({ view });
+  for (const k of FILTER_KEYS) { const v = q.get(k); if (v) apiQuery.set(k, v); }
+  const s = useApi<any>(`/tasks?${apiQuery}`, [apiQuery.toString()]);
   const setStatus = async (t: any, status: string) => {
     if (t.read_only) return;
     try {
@@ -18,39 +38,127 @@ export function TasksPage({ role }: { role: string }) {
       s.reload();
     } catch (e: any) { alert(e.message); }
   };
+  const pushedOpen = useRef(false);
+  const openTask = (t: any) => { pushedOpen.current = true; setQ({ task: t.id }, { push: true }); };
+  const statuses = (q.get("status") ?? "").split(",").filter(Boolean);
+  const chips: [string, string][] = [];
+  if (q.get("q")) chips.push(["q", `Search: “${q.get("q")}”`]);
+  if (q.get("business")) chips.push(["business", BUSINESS_NAMES[q.get("business")!] ?? q.get("business")!]);
+  if (q.get("assignee")) chips.push(["assignee", q.get("assignee") === UNASSIGNED ? "Unassigned" : q.get("assignee")!]);
+  if (statuses.length) chips.push(["status", `Status: ${statuses.map((x) => STATUS_LABEL[x] ?? x).join(", ")}`]);
+  if (q.get("activity")) chips.push(["activity", `Activity: ${q.get("activity")}`]);
+  if (q.get("source")) chips.push(["source", q.get("source") === "tracker" ? "Task Tracker only" : "Dashboard only"]);
+  if (q.get("kind")) chips.push(["kind", q.get("kind") === "recurring" ? "Recurring" : "One-off"]);
+  if (q.get("from") || q.get("to")) chips.push(["from", `Due ${q.get("from") ?? "…"} to ${q.get("to") ?? "…"}`]);
+  const clearAll = () => setQ(Object.fromEntries(FILTER_KEYS.map((k) => [k, null])));
+  const scopeText = [BUSINESS_NAMES[q.get("business") ?? ""], q.get("assignee") ? (q.get("assignee") === UNASSIGNED ? "Unassigned" : q.get("assignee")) : null, VIEWS.find(([k]) => k === view)![1]].filter(Boolean).join(" · ");
+  const counts = s.data?.counts;
   return (
     <div>
-      <Tabs tabs={[["list", "List"], ["board", "Board"]]} value={view} onChange={setView} />
-      <div className="toolbar">
-        <label>Business <select value={business} onChange={(e) => setBusiness(e.target.value)}><option value="">All</option>{Object.entries(BUSINESS_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
-        <label>Owner <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="Any" /></label>
-        <span className="spacer" />{role !== "viewer" && <button className="btn primary small" onClick={() => setCreating(true)}>New task</button>}
-        <span className="sub">Dashboard tasks are edited here. Task Tracker tasks are read-only copies; open them in the Task Tracker to change them. Deadlines use Vietnam time.</span>
+      <div className="tabs" role="tablist" aria-label="Task views">
+        {VIEWS.map(([k, l]) => <button key={k} role="tab" aria-selected={view === k} className={view === k ? "active" : ""} onClick={() => setQ({ view: k, from: null, to: null }, { push: true })}>
+          {l}{k === "needs_attention" && counts ? <span className={`chip ${counts.needs_attention ? "bad" : "muted"}`} style={{ marginLeft: 6 }}>{counts.needs_attention}</span> : null}
+          {k === "this_week" && counts ? <span className="chip muted" style={{ marginLeft: 6 }}>{counts.this_week}</span> : null}</button>)}
+        <span className="spacer" style={{ flex: 1 }} />
+        <div role="group" aria-label="Layout" className="row">{[["list", "List"], ["board", "Board"]].map(([k, l]) => <button key={k} className={`btn small ${layout === k ? "primary" : ""}`} aria-pressed={layout === k} onClick={() => setQ({ layout: k === "list" ? null : k })}>{l}</button>)}</div>
       </div>
+      <div className="toolbar">
+        <label>Search tasks <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Task, activity or promotion" /></label>
+        <label>Business <select value={q.get("business") ?? ""} onChange={(e) => setQ({ business: e.target.value || null })}><option value="">All</option>{Object.entries(BUSINESS_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+        <AssigneePicker value={q.get("assignee")} people={s.data?.assignees ?? []} onChange={(v) => setQ({ assignee: v })} />
+        <span className="spacer" />{role !== "viewer" && <button className="btn primary small" onClick={() => setCreating(true)}>New task</button>}
+        <details className="more-filters" open={["status", "activity", "source", "kind", "from", "to"].some((k) => q.get(k))}>
+          <summary>More filters</summary>
+          <div className="row" style={{ marginTop: 8, alignItems: "flex-start" }}>
+            <fieldset><legend>Status</legend>{Object.entries(STATUS_LABEL).map(([k, l]) => <label key={k}><input type="checkbox" checked={statuses.includes(k)} onChange={(e) => setQ({ status: (e.target.checked ? [...statuses, k] : statuses.filter((x) => x !== k)).join(",") || null })} />{l}</label>)}</fieldset>
+            <label>Activity <select value={q.get("activity") ?? ""} onChange={(e) => setQ({ activity: e.target.value || null })}><option value="">Any</option>{(s.data?.activities ?? []).map((a: string) => <option key={a}>{a}</option>)}</select></label>
+            <label>Source <select value={q.get("source") ?? ""} onChange={(e) => setQ({ source: e.target.value || null })}><option value="">Both</option><option value="dashboard">Dashboard</option><option value="tracker">Task Tracker</option></select></label>
+            <label>Recurring / one-off <select value={q.get("kind") ?? ""} onChange={(e) => setQ({ kind: e.target.value || null })}><option value="">Both</option><option value="recurring">Recurring</option><option value="oneoff">One-off</option></select></label>
+            <label>Custom due dates <input type="date" aria-label="Due from" value={q.get("from") ?? ""} onChange={(e) => setQ({ from: e.target.value || null })} /> to <input type="date" aria-label="Due to" value={q.get("to") ?? ""} onChange={(e) => setQ({ to: e.target.value || null })} /></label>
+          </div>
+        </details>
+      </div>
+      {chips.length > 0 && <div className="row" style={{ marginBottom: 10 }} aria-label="Active filters">{chips.map(([k, l]) => <button key={k} className="chip" onClick={() => setQ(k === "from" ? { from: null, to: null } : { [k]: null })} aria-label={`Remove filter ${l}`}>{l} ×</button>)}
+        <button className="btn small" onClick={clearAll}>Clear filters</button></div>}
       <Async s={s}>{(d) => {
-        const items = d.items.filter((t: any) => t.status !== "cancelled");
         const tr = d.tracker;
-        const freshness = tr && tr.status !== "not_configured" ? <p className={`sub ${tr.status === "failing" ? "bad" : ""}`}>Task Tracker copy: {tr.last_success_at ? `last updated ${when(tr.last_success_at)}` : "not read yet"}{tr.status === "failing" ? ` · the latest read failed, showing the last good copy` : ""}.</p> : null;
-        return <>{freshness}{view === "list" ? (
-          <div className="table-wrap"><table>
-            <thead><tr><th>Task name</th><th>Business</th><th>Activity</th><th>Owner</th><th>Status</th><th>Due date</th><th>Related promotion</th></tr></thead>
-            <tbody>{items.map((t: any) => <tr key={`${t.id}${t.occurrence ?? ""}`} className="clickable" onClick={() => setOpen(t.id)}>
-              <td><b>{t.title}</b>{t.read_only && <span className="chip muted" style={{ marginLeft: 6 }}>Task Tracker</span>}{t.recurrence && <span className="chip muted" style={{ marginLeft: 6 }}>repeats</span>}{t.file_count > 0 && <span className="sub"> · {t.file_count} file(s)</span>}</td>
-              <td>{BUSINESS_NAMES[t.business_id]}</td><td>{t.activity}</td><td>{t.owner ?? "Unassigned"}</td>
-              <td onClick={(e) => e.stopPropagation()}>{role === "viewer" || t.read_only ? t.status : <select value={t.status} onChange={(e) => setStatus(t, e.target.value)}>{[...STATUSES, ["cancelled", "Cancelled"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>}</td>
-              <td className={t.status !== "done" && t.due_date && t.due_date < d.today ? "bad" : ""}>{t.due_date ?? "Not set"}</td><td>{t.promotion_title ?? ""}</td></tr>)}</tbody>
-          </table></div>
-        ) : (
-          <div className="board">{STATUSES.map(([k, l]) => <div key={k} className="col"><h4>{l}</h4>
-            {items.filter((t: any) => t.status === k).map((t: any) => <div key={`${t.id}${t.occurrence ?? ""}`} className="tcard" onClick={() => setOpen(t.id)}>
-              <b>{t.title}</b><div className="sub">{BUSINESS_NAMES[t.business_id]} · {t.owner ?? "Unassigned"}{t.due_date ? ` · ${t.due_date}` : ""}</div>
-              {role !== "viewer" && !t.read_only && <div className="row" style={{ marginTop: 4 }} onClick={(e) => e.stopPropagation()}>{STATUSES.filter(([x]) => x !== k).map(([x, xl]) => <button key={x} className="btn small" onClick={() => setStatus(t, x)}>{xl}</button>)}</div>}
-            </div>)}</div>)}</div>
-        )}</>; }}</Async>
-      {open && <TaskDrawer key={open} id={open} role={role} onClose={() => { setOpen(null); s.reload(); }} />}
+        const freshness = tr && tr.status !== "not_configured" ? <span className={tr.status === "failing" ? "bad" : ""}> Task Tracker copy {tr.last_success_at ? `updated ${when(tr.last_success_at)}` : "not read yet"}{tr.status === "failing" ? "; the latest read failed, showing the last good copy" : ""}.</span> : null;
+        const windowText = view === "needs_attention" ? `Overdue or due today (${shortDate(d.today)})` : view === "this_week" ? `Due ${shortDate(d.window.week.from)} – ${shortDate(d.window.week.to)}` :
+          view === "completed" ? `Completed ${shortDate(d.window.from)} – ${shortDate(d.window.to)}` : `Due ${shortDate(d.window.from)} – ${shortDate(d.window.to)}${view === "all" ? ", plus tasks with no due date" : ""}`;
+        return <>
+          <p className="sub" role="status"><b>{d.total} task{d.total === 1 ? "" : "s"}</b> · {scopeText} · {windowText}. Deadlines use Vietnam time.{freshness}{d.trackerHistoryNote ? ` ${d.trackerHistoryNote}` : ""}
+            {view === "upcoming" && <> <button className="btn small" onClick={() => setQ({ to: addDaysStr(d.window.to, 28) })}>Look 4 more weeks ahead</button></>}
+            {view === "completed" && <> <button className="btn small" onClick={() => setQ({ from: addDaysStr(d.window.from, -30) })}>Show 30 more days</button></>}</p>
+          {d.items.length === 0 ? <div className="state">{view === "needs_attention" ? "Nothing is overdue or due today" : view === "completed" ? "No completed tasks" : "No tasks"} for {scopeText.split(" · ").slice(0, -1).join(" · ") || "everyone"} in this view.{chips.length ? " Try clearing filters or another view." : view === "needs_attention" ? " See This week for what's coming up." : ""}</div>
+            : layout === "list" ? <TaskList items={d.items} view={view} today={d.today} role={role} onOpen={openTask} onStatus={setStatus} />
+            : <TaskBoard items={d.items} today={d.today} role={role} onOpen={openTask} onStatus={setStatus} />}
+        </>; }}</Async>
+      {openId && <TaskDrawer key={openId} id={openId} role={role} onClose={() => { if (pushedOpen.current) { pushedOpen.current = false; history.back(); } else setQ({ task: null }); s.reload(); }} />}
       {creating && <NewTask onClose={() => { setCreating(false); s.reload(); }} />}
     </div>
   );
+}
+
+const addDaysStr = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toISOString().slice(0, 10);
+
+function AssigneePicker({ value, people, onChange }: { value: string | null; people: any[]; onChange: (v: string | null) => void }) {
+  const [text, setText] = useState(value === UNASSIGNED ? "Unassigned" : value ?? "");
+  useEffect(() => { setText(value === UNASSIGNED ? "Unassigned" : value ?? ""); }, [value]);
+  const names = people.map((p) => (p.name === UNASSIGNED ? "Unassigned" : p.name));
+  const commit = (t: string) => { const v = t.trim(); if (!v) return onChange(null); if (v === "Unassigned") return onChange(UNASSIGNED); onChange(v); };
+  return <label>Assignee <input list="assignee-options" value={text} placeholder="Anyone" onChange={(e) => { setText(e.target.value); if (names.includes(e.target.value) || !e.target.value) commit(e.target.value); }} onBlur={(e) => commit(e.target.value)} onKeyDown={(e) => e.key === "Enter" && commit((e.target as HTMLInputElement).value)} />
+    <datalist id="assignee-options">{people.map((p) => <option key={p.name} value={p.name === UNASSIGNED ? "Unassigned" : p.name}>{`${p.count} task${p.count === 1 ? "" : "s"}${p.archived ? " · no longer on the team" : ""}`}</option>)}<option value="Unassigned" /></datalist></label>;
+}
+
+function StatusCell({ t, role, onStatus }: { t: any; role: string; onStatus: (t: any, s: string) => void }) {
+  if (role === "viewer" || t.read_only) return <span className={`chip ${t.status === "done" ? "" : "muted"}`}>{STATUS_LABEL[t.status] ?? t.status}</span>;
+  return <select aria-label={`Status of ${t.title}`} value={t.status} onChange={(e) => onStatus(t, e.target.value)}>{Object.entries(STATUS_LABEL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>;
+}
+
+function TaskRowView({ t, view, today, role, onOpen, onStatus, extra }: any) {
+  const dl = deadlineLabel(t.due_date, today, t.status);
+  return <tr>
+    <td><a href="#" onClick={(e) => { e.preventDefault(); onOpen(t); }}><b>{t.title}</b></a>{t.read_only && <span className="chip muted" style={{ marginLeft: 6 }}>Task Tracker</span>}{t.recurring && <span className="chip muted" style={{ marginLeft: 6 }}>Recurring</span>}{t.file_count > 0 && <span className="sub"> · {t.file_count} file(s)</span>}
+      {t.read_only && t.open_url && <> · <a href={t.open_url} target="_blank" rel="noopener noreferrer">Open in Task Tracker</a></>}{extra}</td>
+    <td>{BUSINESS_NAMES[t.business_id]}</td><td>{t.activity}</td><td>{t.owner ?? "Unassigned"}{t.owner_archived ? <span className="sub"> (no longer on the team)</span> : null}</td>
+    <td onClick={(e) => e.stopPropagation()}><StatusCell t={t} role={role} onStatus={onStatus} /></td>
+    <td className={dl.tone}>{view === "completed" ? (t.completed_basis === "completion" ? `Completed ${shortDate(t.completed_on)}` : `Due ${shortDate(t.completed_on)} (completion time not recorded)`) : dl.text}</td>
+    <td>{t.promotion_title ?? ""}</td></tr>;
+}
+
+function TaskList({ items, view, today, role, onOpen, onStatus }: any) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const head = <thead><tr><th>Task</th><th>Business</th><th>Activity</th><th>Assignee</th><th>Status</th><th>{view === "completed" ? "Completed" : "Deadline"}</th><th>Related promotion</th></tr></thead>;
+  const rows = (list: any[]) => list.map((t: any) => <TaskRowView key={t.key} t={t} view={view} today={today} role={role} onOpen={onOpen} onStatus={onStatus} />);
+  if (view !== "needs_attention") return <div className="table-wrap"><table>{head}<tbody>{rows(items)}</tbody></table></div>;
+  const overdue = items.filter((t: any) => t.due_date < today), dueToday = items.filter((t: any) => t.due_date === today);
+  // Several older overdue occurrences of one routine collapse behind a count; each stays openable with its own assignee, status and date.
+  const groups = new Map<string, any[]>();
+  for (const t of overdue) { const k = t.series_key ?? t.key; groups.set(k, [...(groups.get(k) ?? []), t]); }
+  const overdueRows = [...groups.entries()].sort((a, b) => a[1][0].due_date.localeCompare(b[1][0].due_date)).flatMap(([k, list]) => {
+    if (list.length < 2) return rows(list);
+    const latest = list[list.length - 1], older = list.slice(0, -1), open = expanded.has(k);
+    return [<TaskRowView key={latest.key} t={latest} view={view} today={today} role={role} onOpen={onOpen} onStatus={onStatus}
+      extra={<div><button className="btn small" aria-expanded={open} onClick={() => setExpanded((s) => { const n = new Set(s); open ? n.delete(k) : n.add(k); return n; })}>{open ? "Hide" : "Show"} {older.length} older overdue occurrence{older.length === 1 ? "" : "s"}</button></div>} />,
+      ...(open ? rows(older) : [])];
+  });
+  return <>
+    {overdue.length > 0 && <><h3>Overdue <span className="chip bad">{overdue.length}</span></h3><div className="table-wrap"><table>{head}<tbody>{overdueRows}</tbody></table></div></>}
+    {dueToday.length > 0 && <><h3 style={{ marginTop: 14 }}>Today <span className="chip warn">{dueToday.length}</span></h3><div className="table-wrap"><table>{head}<tbody>{rows(dueToday)}</tbody></table></div></>}
+  </>;
+}
+
+function TaskBoard({ items, today, role, onOpen, onStatus }: any) {
+  const cols = ["todo", "in_progress", ...(items.some((t: any) => t.status === "waiting") ? ["waiting"] : []), "done", ...(items.some((t: any) => t.status === "cancelled") ? ["cancelled"] : [])];
+  return <div className="board" style={{ gridTemplateColumns: `repeat(${cols.length}, minmax(220px, 1fr))` }}>{cols.map((k) => { const list = items.filter((t: any) => t.status === k);
+    return <div key={k} className="col"><h4>{STATUS_LABEL[k]} <span className="chip muted">{list.length}</span></h4>
+      {list.map((t: any) => { const dl = deadlineLabel(t.due_date, today, t.status);
+        return <div key={t.key} className="tcard"><a href="#" onClick={(e) => { e.preventDefault(); onOpen(t); }}><b>{t.title}</b></a>
+          <div className="sub">{BUSINESS_NAMES[t.business_id]} · {t.owner ?? "Unassigned"}{t.read_only ? " · Task Tracker" : ""}{t.recurring ? " · Recurring" : ""}</div>
+          <div className={`sub ${dl.tone}`}>{dl.text}</div>
+          {t.read_only && t.open_url && <a className="sub" href={t.open_url} target="_blank" rel="noopener noreferrer">Open in Task Tracker</a>}
+          {role !== "viewer" && !t.read_only && <div className="row" style={{ marginTop: 4 }}>{["todo", "in_progress", "done"].filter((x) => x !== k).map((x) => <button key={x} className="btn small" onClick={() => onStatus(t, x)}>{STATUS_LABEL[x]}</button>)}</div>}
+        </div>; })}</div>; })}</div>;
 }
 
 function NewTask({ onClose }: { onClose: () => void }) {
@@ -87,7 +195,7 @@ function TaskDrawer({ id, role, onClose }: { id: string; role: string; onClose: 
   </>}</Async></Drawer>;
   return <Drawer onClose={onClose}><Async s={s}>{(d) => <>
     <h2>{d.task.title}</h2>
-    <dl className="kv"><dt>Business</dt><dd>{BUSINESS_NAMES[d.task.business_id]}</dd><dt>Owner</dt><dd>{d.task.owner ?? "Unassigned"}</dd><dt>Status</dt><dd>{d.task.status}</dd>
+    <dl className="kv"><dt>Business</dt><dd>{BUSINESS_NAMES[d.task.business_id]}</dd><dt>Assignee</dt><dd>{d.task.owner ?? "Unassigned"}</dd><dt>Status</dt><dd>{STATUS_LABEL[d.task.status] ?? d.task.status}</dd>
       <dt>Due</dt><dd>{d.task.due_date ?? "Not set"}{d.task.recurrence ? ` (repeats ${d.task.recurrence})` : ""}</dd><dt>Source</dt><dd>{d.task.source === "finding_approval" ? "Created from an approved listing finding" : "Dashboard"}</dd></dl>
     {d.task.description && <p>{d.task.description}</p>}
     <h3 style={{ marginTop: 12 }}>Links</h3>

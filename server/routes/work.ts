@@ -8,6 +8,7 @@ import { occurrences } from "../../shared/recurrence";
 import { validationErrors } from "../../shared/submission";
 import { audit } from "../audit";
 import { giftCalendarItems, checkGiftLink } from "./gifts";
+import { listTasks, TASK_VIEWS } from "../taskQuery";
 import { trackerTaskItems, trackerTaskDetail, trackerCalendar, trackerFreshness, isTrackerId, assertDashboardTask } from "../trackerTasks";
 
 const STATUS = z.enum(["todo", "in_progress", "waiting", "done", "cancelled"]);
@@ -52,6 +53,19 @@ export async function createTask(input: z.infer<typeof taskInput>, actor: string
 export function registerWork(r: Router) {
   // ---------------- tasks
   r.get("/tasks", async ({ url }) => {
+    const view = url.searchParams.get("view");
+    if (view) {
+      // Views used by Marketing Tasks: both sources, filtered after each occurrence's own assignee and status are known.
+      if (!(TASK_VIEWS as readonly string[]).includes(view)) throw badRequest("Unknown view");
+      const list = (k: string) => (url.searchParams.get(k) ?? "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 50);
+      const from = url.searchParams.get("from"), to = url.searchParams.get("to");
+      if ((from && !isIsoDate(from)) || (to && !isIsoDate(to)) || (from && to && to < from)) throw badRequest("from and to must be dates, with to on or after from");
+      const kind = url.searchParams.get("kind");
+      const result = await listTasks({ view: view as any, business: url.searchParams.get("business") || null, assignees: list("assignee"),
+        q: (url.searchParams.get("q") ?? "").trim().slice(0, 120) || null, status: list("status"), activity: list("activity"), source: list("source"),
+        kind: kind === "recurring" || kind === "oneoff" ? kind : null, from, to });
+      return { ...result, tracker: await trackerFreshness() };
+    }
     const b = url.searchParams.get("business"), owner = url.searchParams.get("owner"), status = url.searchParams.get("status");
     const today = todayIn(OPERATIONS_TZ);
     const from = url.searchParams.get("from") ?? addDays(today, -14), to = url.searchParams.get("to") ?? addDays(today, 42);
