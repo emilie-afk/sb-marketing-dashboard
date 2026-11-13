@@ -3,14 +3,18 @@
 import type pg from "pg";
 import { one, query, tx } from "./db";
 import { HttpError } from "./http";
-import { SheetReader, sheetReader } from "./sheetsReader";
+import { SheetReader, sheetReader, ReadOptions } from "./sheetsReader";
+import { createHash } from "node:crypto";
+import { parseDailyAnalytics, parseEosMonths } from "../shared/scorecardParse";
+import { applyPulled } from "./adapters/pullApply";
+import { todayIn, OPERATIONS_TZ, addDays, daysInMonth } from "../shared/dates";
 import { parseAnnualCalendar, parseSeasonalProgram, Sheet, Cell, SOURCE_FIELDS, ParsedWorkbook } from "../shared/calendarParse";
 import { planSync, ExistingPromotion, SourceRole } from "../shared/promotionSync";
 import { checkSubmission } from "../shared/submission";
 import { applySubmission, Receipt } from "./imports";
 import { logServerError, redact } from "./redact";
 
-type SheetSource = { id: string; business_id: string; year: number | null; role: SourceRole; file_id: string; file_kind: "google_sheet" | "xlsx"; label: string };
+type SheetSource = { id: string; business_id: string; year: number | null; role: SourceRole | "daily_analytics" | "eos_scorecard"; file_id: string; file_kind: "google_sheet" | "xlsx"; label: string };
 
 export async function runSheetSync(sourceId: string, trigger: "schedule" | "manual", actor: string, reader: SheetReader = sheetReader) {
   const src = await one<SheetSource>("select id, business_id, year, role, file_id, file_kind, label from sheet_sources where id = $1 and active", [sourceId]);
@@ -20,7 +24,7 @@ export async function runSheetSync(sourceId: string, trigger: "schedule" | "manu
 
   let sheets: Sheet[];
   try {
-    sheets = await reader(src.file_id, src.file_kind);
+    sheets = await reader(src.file_id, src.file_kind, readOptions(src.role));
   } catch (e) {
     const msg = e instanceof HttpError ? e.message : "The spreadsheet could not be read.";
     if (!(e instanceof HttpError)) logServerError("sheet-read", e);
@@ -30,6 +34,7 @@ export async function runSheetSync(sourceId: string, trigger: "schedule" | "manu
 
   try {
     if (src.role === "intake") return await syncIntake(src, sheets, run.id, actor);
+    if (src.role === "daily_analytics" || src.role === "eos_scorecard") return await syncFigures(src, sheets, run.id, actor);
     const parsed = src.role === "annual_calendar" ? parseAnnualCalendar(sheets, src.year!) : parseSeasonalProgram(sheets, src.year!);
     return await applyCalendar(src, parsed, run.id, actor);
   } catch (e) {
@@ -38,6 +43,53 @@ export async function runSheetSync(sourceId: string, trigger: "schedule" | "manu
     await fail(run.id, src.id, msg);
     return { outcome: "failed" as const, error: msg, sync_run_id: run.id };
   }
+}
+
+// The two figure workbooks are large (one formatted tab per month or year); only recent tabs and their top rows hold figures.
+const FIGURES_FROM_YEAR = 2025;
+function readOptions(role: SheetSource["role"]): ReadOptions | undefined {
+  const recent = (n: string) => { const y = /(\d{4})\s*$/.exec(n.trim()); return !!y && Number(y[1]) >= FIGURES_FROM_YEAR; };
+  if (role === "daily_analytics") return { tabs: recent, maxRows: 80 };
+  if (role === "eos_scorecard") return { tabs: recent, maxRows: 60 };
+  return undefined;
+}
+
+/**
+ * Daily Analytics Report → daily revenue and orders; EOS scorecard → month totals. One submission per business and
+ * month; a month whose figures changed in the spreadsheet is sent as a correction of the earlier one, an unchanged
+ * month writes nothing.
+ */
+async function syncFigures(src: SheetSource, sheets: Sheet[], runId: string, actor: string) {
+  const today = todayIn(OPERATIONS_TZ);
+  const daily = src.role === "daily_analytics";
+  const batches = daily ? parseDailyAnalytics(sheets, { fromYear: FIGURES_FROM_YEAR, through: addDays(today, -1) }) : parseEosMonths(sheets, { fromYear: FIGURES_FROM_YEAR, today });
+  if (!batches.length) throw new HttpError(422, "no_figures", daily ? "No month tabs with daily figures were found (tabs named like \"October 2026\")." : "No finished month columns were found (year tabs with \"TOTAL (MONTH)\" columns).");
+  const who = daily ? { sourceId: "sheet.daily_analytics", submitter: `sheet:${src.id}`, submissionSource: "daily_analytics" }
+    : { sourceId: "sheet.eos_scorecard", submitter: `sheet:${src.id}`, submissionSource: "eos_scorecard" };
+  const receipts: any[] = [];
+  for (const b of batches) {
+    const [y, m] = b.month.split("-").map(Number);
+    const family = `${daily ? "dar" : "eos"}:${b.business}:${b.month}`;
+    const records = { observations: b.observations };
+    const hash = createHash("sha256").update(JSON.stringify(records)).digest("hex").slice(0, 16);
+    const body = {
+      schema_version: 1, submission_id: `${family}:${hash}`, source: who.submissionSource, business: b.business,
+      period: { start: `${b.month}-01`, end: `${b.month}-${String(daysInMonth(y, m)).padStart(2, "0")}`, granularity: "month", timezone: "America/Los_Angeles" },
+      collected_at: new Date().toISOString(), completeness: "complete", records,
+      source_refs: [{ label: `${src.label}: ${b.month}` }],
+    };
+    const r: any = await applyPulled(body, family, who, `sheet:${src.label}`);
+    receipts.push({ label: `${b.business} ${b.month}`, outcome: r.outcome, submission_id: r.submission_id, notes: b.notes });
+  }
+  const changed = receipts.filter((r) => r.outcome === "accepted").length, unchanged = receipts.filter((r) => r.outcome === "unchanged").length;
+  const problems = receipts.filter((r) => r.outcome === "rejected" || r.outcome === "failed");
+  const outcome = problems.length ? "partial" : "succeeded";
+  await query(`update sync_runs set finished_at = now(), outcome = $2, tabs_read = $3, created_count = $4, unchanged_count = $5, review_count = $6, error = $7 where id = $1`,
+    [runId, outcome, JSON.stringify(receipts.map((r) => ({ tab: r.label, kind: r.outcome, dataRows: 0, blank: false, skipped: r.notes.length ? redact(r.notes.join("; "), 500) : undefined }))), changed, unchanged, problems.length,
+      problems.length ? `${problems.length} month(s) rejected` : null]);
+  await query("update sheet_sources set last_success_at = now(), last_error = $2 where id = $1", [src.id, problems.length ? `${problems.length} month(s) rejected` : null]);
+  await query("update source_connections set status = $2, last_success_at = now(), last_error = $3, updated_at = now() where id = $1", [who.sourceId, problems.length ? "failing" : "ok", problems.length ? `${problems.length} month(s) rejected` : null]);
+  return { outcome, sync_run_id: runId, receipts };
 }
 
 async function fail(runId: string, srcId: string, msg: string) {
@@ -70,7 +122,7 @@ async function applyCalendar(src: SheetSource, parsed: ParsedWorkbook, runId: st
       [src.id])).rows;
     const promos = await candidatePromotions(c, src);
     if (afterReadHook) await afterReadHook(src);
-    const plan = planSync({ role: src.role, parsed, links, promotions: promos });
+    const plan = planSync({ role: src.role as SourceRole, parsed, links, promotions: promos });
 
     for (const cr of plan.create) {
       const r = cr.record;

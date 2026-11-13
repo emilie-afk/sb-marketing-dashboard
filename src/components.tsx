@@ -111,6 +111,7 @@ export function AdvertisingBlock({ platforms, showBusiness = true }: { platforms
           {ps.map((p) => (
             <details key={p.platform} open={!showBusiness}>
               <summary>{PLATFORM_NAMES[p.platform] ?? p.platform}: {p.campaigns.length} campaign{p.campaigns.length === 1 ? "" : "s"}</summary>
+              {p.reportedPeriods?.length > 1 && <p className="sub" style={{ margin: "4px 0 0" }}>Added up from weekly results: {p.reportedPeriods.map((r: any) => range(r)).join(", ")}. Budget/day is the latest reported.</p>}
               <div className="table-wrap" style={{ margin: "8px 0 12px" }}>
                 <table>
                   <thead><tr><th>Campaign name</th><th>Status</th><th className="n">Budget/day</th><th className="n">Cost</th><th className="n">CPA</th><th className="n">ROAS</th></tr></thead>
@@ -164,7 +165,7 @@ export function WorkBlock({ work }: { work: any }) {
 export function ActivityList({ items }: { items: any[] }) {
   return <ul className="list">{items.map((a: any, i: number) => (
     <li key={i}><b>{a.name}</b>{a.count !== null && a.count !== undefined && <span>: {a.count} {a.count_unit}</span>}
-      <div className="sub">{range({ start: a.period_start, end: a.period_end })}{a.link && <> · <a href={a.link} target="_blank" rel="noreferrer">link</a></>}</div></li>))}</ul>;
+      <div className="sub">{range({ start: a.period_start, end: a.period_end })}{a.prorated && <> · {a.prorated.days_inside} of its {a.prorated.days_total} days in this period, so {a.count} of {a.prorated.full_count} counted</>}{a.link && <> · <a href={a.link} target="_blank" rel="noreferrer">link</a></>}</div></li>))}</ul>;
 }
 
 export function ProductsBlock({ p, onVendor }: { p: any; onVendor?: (id: string) => void }) {

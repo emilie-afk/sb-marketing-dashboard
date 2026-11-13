@@ -1,7 +1,7 @@
 // Reads active observations for a period, honouring each source's real coverage.
 import { query } from "./db";
 import { DateRange, addDays, comparisonPeriod, ComparisonKind, dayCount, equivalentElapsed } from "../shared/dates";
-import { resolveCoverage, AvailablePeriod, CoverageResult } from "../shared/coverage";
+import { resolveCoverage, periodWithin, AvailablePeriod, CoverageResult } from "../shared/coverage";
 import { Fig, fig, missing, notApplicable, sumFigs, ratio, change, Change, purchaseCpa, Unit, Direction } from "../shared/metrics";
 
 type ObsRow = { metric_key: string; scope_key: string; period_start: string; period_end: string; granularity: any; timezone: string;
@@ -40,7 +40,7 @@ export function baseTotal(rows: ObsRow[], metric: string, range: DateRange): { v
   const mine = rows.filter((r) => r.metric_key === metric);
   // The same figure for the same period from more than one source is never added together.
   const seen = new Map<string, Set<string>>();
-  for (const r of mine.filter((r) => r.period_start >= range.start && r.period_end <= range.end)) {
+  for (const r of mine.filter((r) => periodWithin({ start: r.period_start, end: r.period_end, granularity: r.granularity }, range))) {
     const k = `${r.period_start}|${r.period_end}|${r.granularity}`;
     seen.set(k, (seen.get(k) ?? new Set()).add(r.source_id));
   }
@@ -48,7 +48,7 @@ export function baseTotal(rows: ObsRow[], metric: string, range: DateRange): { v
     const cov: CoverageResult = { status: "unsupported", reason: "Reported by more than one source for the same period" };
     return { value: missing(cov.reason), coverage: cov, timezone: null, covered: null };
   }
-  const avail: (AvailablePeriod & { row: ObsRow })[] = mine.map((r) => ({ start: r.period_start, end: r.period_end, granularity: r.granularity, completeness: r.completeness, row: r }));
+  const avail: (AvailablePeriod & { row: ObsRow })[] = mine.map((r) => ({ start: r.period_start, end: r.period_end, granularity: r.granularity, completeness: r.completeness, known: r.value_state === "value", row: r }));
   const cov = resolveCoverage(range, avail);
   if (cov.status === "unsupported") return { value: missing(cov.reason), coverage: cov, timezone: null, covered: null };
   const used = (cov.periods as typeof avail).map((p) => p.row);
@@ -81,7 +81,15 @@ export async function metricValue(business: string, key: string, scope: string, 
     const g = grossMarginFromRows(await marginRows(business, scope, range), range);
     return { key, label: d.label, unit: d.unit, value: g.value, coverage: g.coverage, timezone: g.timezone, covered: g.covered };
   }
-  const rows = await observationsFor(business, [d.numerator!, d.denominator!], scope, range);
+  const rows = await observationsFor(business, [d.numerator!, d.denominator!, key], scope, range);
+  // A rate reported for exactly this month (the EOS scorecard's month column) is used as reported: its counts are
+  // only stored by week, and a week running past the month is never split.
+  const monthRate = rows.filter((r) => r.metric_key === key && r.granularity === "month" && r.period_start === range.start && r.period_end === range.end);
+  if (monthRate.length === 1 && key !== "cpa" && key !== "roas") {
+    const r = monthRate[0];
+    const value = withCompleteness({ state: r.value_state, value: r.value, note: "Month figure from the EOS scorecard" }, [r.completeness]);
+    return { key, label: d.label, unit: d.unit, value, coverage: { status: "supported", granularity: "month", periods: [{ start: r.period_start, end: r.period_end, granularity: "month" }], partial: false }, timezone: r.timezone, covered: range };
+  }
   const n = baseTotal(rows, d.numerator!, range), m = baseTotal(rows, d.denominator!, range);
   const value = key === "cpa" ? purchaseCpa(n.value, m.value) : ratio(n.value, m.value);
   return { key, label: d.label, unit: d.unit, value, coverage: n.coverage.status !== "supported" ? n.coverage : m.coverage, timezone: n.timezone ?? m.timezone, covered: n.covered };
@@ -171,12 +179,12 @@ const owner = (r: MarginRow) => `${r.source_id}|${r.submitter}|${r.submission_so
 
 export function grossMarginFromRows(rows: MarginRow[], range: DateRange): { value: Fig; coverage: CoverageResult; timezone: string | null; covered: DateRange | null } {
   const profit = rows.filter((r) => r.metric_key === "gross_profit");
-  const inRange = profit.filter((r) => r.period_start >= range.start && r.period_end <= range.end);
+  const inRange = profit.filter((r) => periodWithin({ start: r.period_start, end: r.period_end, granularity: r.granularity }, range));
   const periodOwners = new Map<string, Set<string>>();
   for (const r of inRange) { const k = `${r.period_start}|${r.period_end}|${r.granularity}`; periodOwners.set(k, (periodOwners.get(k) ?? new Set()).add(owner(r))); }
   if ([...periodOwners.values()].some((o) => o.size > 1))
     return { value: unavailable("Gross profit for this period comes from more than one integration"), coverage: { status: "unsupported", reason: "Reported by more than one integration" }, timezone: null, covered: null };
-  const avail = profit.map((r) => ({ start: r.period_start, end: r.period_end, granularity: r.granularity, completeness: r.completeness, row: r }));
+  const avail = profit.map((r) => ({ start: r.period_start, end: r.period_end, granularity: r.granularity, completeness: r.completeness, known: r.value_state === "value", row: r }));
   const cov = resolveCoverage(range, avail);
   if (cov.status === "unsupported") return { value: unavailable(cov.reason), coverage: cov, timezone: null, covered: null };
   const used = (cov.periods as typeof avail).map((p) => p.row);

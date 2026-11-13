@@ -4,10 +4,11 @@ import type { Router } from "../router";
 import { trackerWorkRows } from "../trackerTasks";
 import { query, one } from "../db";
 import { badRequest, notFound } from "../http";
-import { compared, trend, metricDefs } from "../metricQuery";
-import { DateRange, isIsoDate, addDays, comparisonPeriod, ComparisonKind, todayIn, OPERATIONS_TZ, formatRange } from "../../shared/dates";
+import { compared, trend, metricDefs, metricValue } from "../metricQuery";
+import { DateRange, isIsoDate, addDays, eachDay, comparisonPeriod, ComparisonKind, todayIn, OPERATIONS_TZ, formatRange } from "../../shared/dates";
 import { Fig, fig, missing, notApplicable, sumFigs, ratio, purchaseCpa, change } from "../../shared/metrics";
 import { rankingScopeLabel, totalWithBreakdown, trackedChannels } from "../../shared/scope";
+import { periodWithin } from "../../shared/coverage";
 
 const BUSINESSES = ["sb", "p2s", "perksradar"] as const;
 const HEADLINE: Record<string, string[]> = {
@@ -65,40 +66,104 @@ export async function advertising(b: string | null, range: DateRange, includeZer
     `select c.id, c.business_id, c.platform, c.name, c.external_id,
             p.spend::float8 spend, p.acquisitions::float8 acquisitions, p.conversion_value::float8 conversion_value, p.acquisition_event, p.attribution,
             p.reported_cpa::float8 reported_cpa, p.reported_roas::float8 reported_roas,
-            p.daily_budget::float8 daily_budget, p.budget_note,
+            p.daily_budget::float8 daily_budget, p.budget_note, p.granularity,
             to_char(p.period_start,'YYYY-MM-DD') period_start, to_char(p.period_end,'YYYY-MM-DD') period_end, p.timezone,
             (select status from campaign_status_history h where h.campaign_id = c.id order by observed_at desc limit 1) as current_status,
             (select observed_at from campaign_status_history h where h.campaign_id = c.id order by observed_at desc limit 1) as status_observed_at,
             exists (select 1 from campaign_inclusions i where i.campaign_id = c.id) as explicitly_included
        from ad_campaigns c join campaign_performance p on p.campaign_id = c.id and p.status = 'active'
-      where ($1::text is null or c.business_id = $1) and p.period_start = $2 and p.period_end = $3
-      order by c.business_id, c.platform, p.spend desc nulls last`, [b, range.start, range.end]);
+      where ($1::text is null or c.business_id = $1) and p.period_end >= $2 and p.period_start <= $3
+      order by c.business_id, c.platform, p.period_start`, [b, range.start, range.end]);
+  // Weekly results count toward the range only when all their days are inside it; a campaign reported in several
+  // weeks is added up across them. A week running past the range is never split: the campaign's figures are marked
+  // incomplete and say which week was left out. A result for exactly the range is used on its own.
+  const fitting = rows.filter((r) => periodWithin({ start: r.period_start, end: r.period_end }, range));
+  // Whole weeks inside the range first (they carry the week's purchases), then daily results for the days no
+  // whole week covers, then anything else.
+  const rank = (r: any) => (r.granularity === "week" ? 0 : r.granularity === "day" ? 1 : 2);
+  const outside = new Map<string, { start: string; end: string }[]>();
+  for (const r of rows) if (!periodWithin({ start: r.period_start, end: r.period_end }, range)) outside.set(r.id, [...(outside.get(r.id) ?? []), { start: r.period_start, end: r.period_end }]);
+  const byCampaign = new Map<string, any[]>();
+  for (const r of fitting) byCampaign.set(r.id, [...(byCampaign.get(r.id) ?? []), r]);
+  const merged = [...byCampaign.values()].map((rs) => {
+    const taken = new Set<string>();
+    const exact = rs.filter((r) => r.period_start === range.start && r.period_end === range.end);
+    // A period that overlaps one already counted is left out, so spend is never counted twice.
+    const pool = exact.length ? exact : [...rs].sort((a, b) => rank(a) - rank(b) || a.period_start.localeCompare(b.period_start) || a.period_end.localeCompare(b.period_end));
+    const use: any[] = [];
+    let overlapped = false;
+    for (const r of pool) {
+      const days = eachDay({ start: r.period_start, end: r.period_end });
+      if (days.some((d) => taken.has(d))) {
+        // Daily results inside a week already counted are expected; two results of the same kind overlapping is not.
+        if (use.some((u) => u.granularity === r.granularity && u.period_start <= r.period_end && u.period_end >= r.period_start)) overlapped = true;
+        continue;
+      }
+      days.forEach((d) => taken.add(d)); use.push(r);
+    }
+    use.sort((a, b) => a.period_start.localeCompare(b.period_start));
+    const last = use[use.length - 1];
+    const sumOf = (k: string) => { const f = sumFigs(use.map((r) => (r[k] === null ? missing() : fig(r[k])))); return f; };
+    const single = use.length === 1;
+    const attributions = [...new Set(use.map((r) => r.attribution ?? ""))], events = [...new Set(use.map((r) => r.acquisition_event))];
+    const mixed = attributions.length > 1 || events.length > 1;
+    let spendFig: Fig = sumOf("spend"), acqFig: Fig = sumOf("acquisitions"), valFig: Fig = sumOf("conversion_value");
+    if (overlapped && spendFig.value !== null) spendFig = { ...spendFig, state: "incomplete", note: "Some reported periods overlap; each day is counted once" };
+    // Weeks running past the range are left out, unless daily results already cover their days inside it.
+    const left = exact.length ? [] : (outside.get(last.id) ?? []).filter((p) => eachDay({ start: p.start > range.start ? p.start : range.start, end: p.end < range.end ? p.end : range.end }).some((d) => !taken.has(d)));
+    if (left.length) {
+      const note = `${left.map((p) => formatRange(p)).join(", ")} ${left.length === 1 ? "runs" : "run"} past this period and ${left.length === 1 ? "is" : "are"} not included (weekly results are never split)`;
+      const inc = (f: Fig): Fig => (f.value === null ? f : { ...f, state: "incomplete", note });
+      spendFig = inc(spendFig); acqFig = inc(acqFig); valFig = inc(valFig);
+    }
+    return { ...last, _spend: spendFig,
+      _acq: acqFig, _val: valFig, mixed,
+      reported_cpa: single ? last.reported_cpa : null, reported_roas: single ? last.reported_roas : null,
+      attribution: attributions.length === 1 ? attributions[0] || null : attributions.filter(Boolean).join("; "), acquisition_event: events.length === 1 ? events[0] : events.join("/"),
+      periods: use.map((r) => ({ start: r.period_start, end: r.period_end })) };
+  }).sort((a, b) => a.business_id.localeCompare(b.business_id) || a.platform.localeCompare(b.platform) || (b._spend.value ?? -1) - (a._spend.value ?? -1));
   const groups = new Map<string, any>();
-  for (const r of rows) {
+  for (const r of merged) {
+    r.spend = r._spend.value; r.acquisitions = r._acq.value; r.conversion_value = r._val.value;
     // Zero spend is not inactivity; zero-spend rows are hidden from performance tables unless explicitly included.
     if (!includeZero && (r.spend === 0 || r.spend === null) && !r.explicitly_included) continue;
     const key = `${r.business_id}|${r.platform}`;
     if (!groups.has(key)) groups.set(key, { business: r.business_id, platform: r.platform, campaigns: [] });
-    const spend: Fig = r.spend === null ? missing() : fig(r.spend);
-    const acq: Fig = r.acquisitions === null ? missing() : fig(r.acquisitions);
-    const val: Fig = r.conversion_value === null ? missing() : fig(r.conversion_value);
+    const spend: Fig = r._spend, acq: Fig = r._acq, val: Fig = r._val;
     groups.get(key).campaigns.push({
       id: r.id, name: r.name, status: r.current_status ?? "Unknown", statusObservedAt: r.status_observed_at,
       dailyBudget: r.daily_budget === null ? missing(r.budget_note ?? undefined) : { ...fig(r.daily_budget), ...(r.budget_note ? { note: r.budget_note } : {}) },
-      spend, cpa: r.acquisitions === null && r.reported_cpa !== null ? { state: "value", value: r.reported_cpa, note: "As reported" } : purchaseCpa(spend, acq),
-      roas: r.conversion_value === null && r.reported_roas !== null ? { state: "value", value: r.reported_roas, note: "As reported" } : ratio(val, spend),
-      acquisitionEvent: r.acquisition_event, attribution: r.attribution, explicitlyIncluded: r.explicitly_included, _acq: acq, _val: val,
+      spend,
+      // Weeks counted with different acquisition events or attribution settings can't share one CPA or ROAS.
+      cpa: r.mixed ? missing("Weeks use different acquisition events or attribution") : r.acquisitions === null && r.reported_cpa !== null ? { state: "value", value: r.reported_cpa, note: "As reported" } : purchaseCpa(spend, acq),
+      roas: r.mixed ? missing("Weeks use different acquisition events or attribution") : r.conversion_value === null && r.reported_roas !== null ? { state: "value", value: r.reported_roas, note: "As reported" } : ratio(val, spend),
+      mixed: r.mixed,
+      acquisitionEvent: r.acquisition_event, attribution: r.attribution, explicitlyIncluded: r.explicitly_included, periods: r.periods, _acq: acq, _val: val,
     });
+  }
+  // Exact month totals per platform (the EOS scorecard's month columns) replace the sum of whole weeks.
+  for (const g of groups.values()) {
+    const m = await metricValue(g.business, "ad_spend", `platform:${g.platform}`, range);
+    if (m.coverage.status === "supported" && (m.coverage.granularity === "month" || m.coverage.granularity === "day") && m.value.value !== null) g.monthSpend = { ...m.value, note: m.coverage.granularity === "month" ? "Month total from the EOS scorecard" : m.value.note };
   }
   return [...groups.values()].map((g) => {
     // Platform totals only when every campaign shares the same acquisition event and attribution.
     const events = new Set(g.campaigns.map((c: any) => `${c.acquisitionEvent}|${c.attribution ?? ""}`));
-    const spend = sumFigs(g.campaigns.map((c: any) => c.spend));
-    const totals = events.size === 1
+    const campSpend = sumFigs(g.campaigns.map((c: any) => c.spend));
+    const spend: Fig = g.monthSpend ?? campSpend;
+    // CPA and ROAS need purchases for the same days as the spend: with a month total but campaign weeks left out,
+    // they are withheld rather than mixing a full month of spend with part of its purchases.
+    const sameDays = !g.monthSpend || campSpend.state === "value";
+    const totals = !sameDays
+      ? { spend, cpa: missing("Purchases are reported by week; a week running past this period is not included"), roas: missing("Purchases are reported by week; a week running past this period is not included") }
+      : events.size === 1 && !g.campaigns.some((c: any) => c.mixed)
       ? { spend, cpa: purchaseCpa(spend, sumFigs(g.campaigns.map((c: any) => c._acq))), roas: ratio(sumFigs(g.campaigns.map((c: any) => c._val)), spend) }
       : { spend, cpa: missing("Campaigns use different acquisition events or attribution"), roas: missing("Campaigns use different attribution") };
-    g.campaigns.forEach((c: any) => { delete c._acq; delete c._val; });
-    return { ...g, totals, period: range };
+    delete g.monthSpend;
+    g.campaigns.forEach((c: any) => { delete c._acq; delete c._val; delete c.mixed; });
+    const weeks = [...new Map(g.campaigns.flatMap((c: any) => c.periods).map((p: any) => [p.start + p.end, p])).values()].sort((a: any, b: any) => (a.start < b.start ? -1 : 1));
+    g.campaigns.forEach((c: any) => { delete c.periods; });
+    return { ...g, totals, period: range, reportedPeriods: weeks };
   });
 }
 

@@ -58,7 +58,7 @@ function ReportView({ id, role }: { id: string; role: string }) {
       <Section title="Advertising"><AdvertisingBlock platforms={c.advertising} /></Section>
       <Section title="Promotions" sub="Promotions whose dates overlap this period.">
         <PromotionList items={[...c.promotions.current, ...c.promotions.upcoming]} /></Section>
-      <Section title="Activities" sub="Activities reported for periods inside this report period.">{c.activities.length ? <ActivityList items={c.activities} /> : <div className="state">None reported.</div>}</Section>
+      <Section title="Activities" sub="Activities reported for this period. A week running past the period counts by the share of its days inside it.">{c.activities.length ? <ActivityList items={c.activities} /> : <div className="state">None reported.</div>}</Section>
       {c.products && c.products.vendors?.length > 0 && <Section title="Product and vendor details" sub={c.products.scopeLabel}><VendorTable vendors={c.products.vendors.slice(0, 10)} /></Section>}
     </>}
     <Section title="Files" sub="Original images, PDFs, spreadsheets and report packs. Images are attached as files only; they never feed charts.">
