@@ -80,3 +80,21 @@ export async function pullCorporateGifting(actor = CG_SUBMITTER) {
   });
   return { outcome: problems.length ? "incomplete" as const : "done" as const, results, problems };
 }
+
+const sampleSignupsSchema = z.object({
+  ok: z.literal(true),
+  schema_version: z.literal(1),
+  count: z.number().int().nonnegative(),
+});
+
+export async function corporateSampleSignups() {
+  if (!corporateGiftingCredentials()) return { count: null };
+  try {
+    const origin = originOf(process.env.CORPORATE_GIFTING_API_URL)!;
+    const headers = { authorization: `Bearer ${process.env.CORPORATE_GIFTING_REPORTING_SECRET}` };
+    const report = await getJson(origin, "/api/reporting/v1/sample-signups", headers, "Corporate Gifting sample signups");
+    return { count: sampleSignupsSchema.parse(report).count };
+  } catch {
+    return { count: null };
+  }
+}
