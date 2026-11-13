@@ -183,6 +183,29 @@ describe("calendar-day counting across a month", () => {
   });
 });
 
+describe("daily campaign results", () => {
+  it("counts each day once: daily results cover the days of a week running past the range", async () => {
+    // A Saturday–Friday week (Jun 27 – Jul 3, 2025) reported as a week AND day by day; Jul 4 – 10 as a week only.
+    const wk = (start: string, end: string, spend: number, id: string) => submit({ ...envelope(id, "sb", { start, end }), source: "ads",
+      records: { campaigns: [{ platform: "google", external_id: "d-1", name: "Daily test", spend, acquisitions: 1, conversion_value: 40, daily_budget: 10 }] } });
+    await wk("2025-06-27", "2025-07-03", 70, "dc-w1");
+    await wk("2025-07-04", "2025-07-10", 70, "dc-w2");
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(Date.parse("2025-06-27T00:00:00Z") + i * 864e5).toISOString().slice(0, 10);
+      await submit({ ...envelope(`dc-d${i}`, "sb", { start: d, end: d }, "day"), source: "ads",
+        records: { campaigns: [{ platform: "google", external_id: "d-1", name: "Daily test", spend: 10, acquisitions: null, conversion_value: null, daily_budget: 10 }] } });
+    }
+    const g = async (start: string, end: string) => (await call("viewer", "GET", `/business/sb/advertising?start=${start}&end=${end}`)).body.platforms.find((p: any) => p.platform === "google").campaigns.find((c: any) => c.name === "Daily test");
+    // Jul 1–10: three days from daily results (Jul 1–3) plus the week Jul 4–10, nothing counted twice.
+    const jul = await g("2025-07-01", "2025-07-10");
+    expect(jul.spend).toMatchObject({ state: "value", value: 30 + 70 });
+    // Jun 27 – Jul 3 as one range: the daily results only (the week's total is not added on top).
+    expect((await g("2025-06-27", "2025-07-03")).spend).toMatchObject({ state: "value", value: 70 });
+    // Purchases are only known by week here, so CPA/ROAS for Jul 1–10 can't cover every day.
+    expect(jul.roas.value === null || jul.roas.state !== "value").toBe(true);
+  });
+});
+
 describe("campaign results across weeks", () => {
   it("never counts overlapping periods twice and withholds CPA/ROAS across different definitions", async () => {
     const w1 = { start: "2027-04-03", end: "2027-04-09" }, w2 = { start: "2027-04-10", end: "2027-04-16" }, wOverlap = { start: "2027-04-05", end: "2027-04-11" };

@@ -75,6 +75,25 @@ describe("Gross Profit", () => {
     expect(m.margin.value.value).toBeCloseTo(0.25, 9);
     expect(p.body.source.status).toBe("ok");
   });
+  it("uses the days a week sends, so a month counts each order date once; days that don't add up are ignored", async () => {
+    const day = (date: string, gp: number) => ({ date, gross_profit: gp, gross_profit_revenue_basis: gp * 4, product_cost: gp * 2, shipping_cost: gp });
+    const wk = (start: string, gps: number[], over: any = {}) => gpWeek(start, { totals: { gross_profit: gps.reduce((a, b) => a + b, 0), gross_profit_revenue_basis: gps.reduce((a, b) => a + b, 0) * 4, product_cost: 0, shipping_cost: 0 },
+      days: gps.map((g, i) => day(addDays(start, i), g)), ...over });
+    // Mon Sep 28 – Sun Oct 4 runs into October; Oct 5 – 11 sends days that don't add up to its totals.
+    routes[`${GP_URL}/v1/reporting/weeks?limit=52`] = reply({ ok: true, schema_version: 1, weeks: [wk("2025-09-29", [1, 2, 10, 20, 30, 40, 50]),
+      { ...wk("2025-10-06", [5, 5, 5, 5, 5, 5, 5]), days: [day("2025-10-06", 999)] }], next_cursor: null });
+    await pullGrossProfit();
+    const { metricValue } = await import("../server/metricQuery");
+    // Oct 1–5: Wed–Sun of the first week from its days (10+20+30+40+50).
+    const oct = await metricValue("sb", "gross_profit", GP_SCOPE, { start: "2025-10-01", end: "2025-10-05" });
+    expect(oct.value).toMatchObject({ state: "value", value: 150 });
+    expect(oct.coverage).toMatchObject({ status: "supported", granularity: "day" });
+    expect((await metricValue("sb", "margin", GP_SCOPE, { start: "2025-10-01", end: "2025-10-05" })).value.value).toBeCloseTo(0.25, 9);
+    // The second week's days were ignored: only its week total is stored.
+    expect((await q("select count(*)::int n from observations where source_id = 'pull.gross_profit' and granularity = 'day' and period_start >= '2025-10-06' and status = 'active'"))[0].n).toBe(0);
+    const both = await metricValue("sb", "gross_profit", GP_SCOPE, { start: "2025-10-01", end: "2025-10-12" });
+    expect(both.value.state).toBe("incomplete");     // Oct 6–12 has no days, its week runs past the range
+  });
   it("a re-read changes nothing; a new published revision corrects the earlier one", async () => {
     routes[`${GP_URL}/v1/reporting/weeks?limit=52`] = reply({ ok: true, schema_version: 1, weeks: [gpWeek("2026-09-07"), gpWeek("2026-09-14", { completeness: "provisional", completeness_reasons: ["missing_product_costs"], totals: { gross_profit: 80, gross_profit_revenue_basis: 300, product_cost: 190, shipping_cost: null } })], next_cursor: null });
     const before = (await q("select count(*)::int n from import_runs where source_id = 'pull.gross_profit'"))[0].n;

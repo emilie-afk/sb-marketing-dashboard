@@ -26,6 +26,8 @@ const weekSchema = z.object({
   completeness: z.enum(["complete", "provisional", "partial"]), completeness_reasons: z.array(z.string()),
   computed_at: z.string().nullable(), published_at: z.string().nullable(),
   totals: z.object({ gross_profit: amount, gross_profit_revenue_basis: amount, product_cost: amount, shipping_cost: amount }).passthrough(),
+  // Optional: the same week by order date (the GP app's own monthly view adds orders up the same way).
+  days: z.array(z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), gross_profit: amount, gross_profit_revenue_basis: amount, product_cost: amount, shipping_cost: amount }).passthrough()).max(7).optional(),
 });
 const pageSchema = z.object({ ok: z.literal(true), schema_version: z.literal(1), weeks: z.array(z.unknown()), next_cursor: z.string().nullable() });
 type Week = z.infer<typeof weekSchema>;
@@ -34,11 +36,25 @@ const obs = (metric: string, v: number | null) => v === null
   ? { metric, scope: GP_SCOPE, scope_label: GP_SCOPE_LABEL, value: null, state: "missing" as const }
   : { metric, scope: GP_SCOPE, scope_label: GP_SCOPE_LABEL, value: v };
 
-/** One published week → one submission. */
+const close = (a: number, b: number | null) => b !== null && Math.abs(a - b) <= 0.05;
+/** A week's days, only when they lie inside the week, are complete figures and add up to the week's totals. */
+export function usableDays(w: Week) {
+  const days = w.days ?? [];
+  if (!days.length || new Set(days.map((d) => d.date)).size !== days.length) return [];
+  if (days.some((d) => d.date < w.period.start || d.date > w.period.end || d.gross_profit === null || d.gross_profit_revenue_basis === null)) return [];
+  const sum = (k: "gross_profit" | "gross_profit_revenue_basis" | "product_cost" | "shipping_cost") => days.reduce((a, d) => a + (d[k] ?? 0), 0);
+  if (!close(sum("gross_profit"), w.totals.gross_profit) || !close(sum("gross_profit_revenue_basis"), w.totals.gross_profit_revenue_basis)) return [];
+  return [...days].sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+/** One published week → one submission (week totals, plus the same figures by day when the app sends them). */
 export function weekToSubmission(w: Week) {
+  const days = usableDays(w);
+  const dayObs = days.flatMap((d) => (["gross_profit", "gross_profit_revenue_basis", "product_cost", "shipping_cost"] as const)
+    .map((k) => ({ ...obs(k, d[k] ?? null), period_start: d.date, period_end: d.date, granularity: "day" as const })));
   return {
     schema_version: 1,
-    submission_id: `gp:${w.period.week_start}:r${w.revision}`,
+    submission_id: `gp:${w.period.week_start}:r${w.revision}${days.length ? "d" : ""}`,
     source: "gross_profit", business: "sb" as const,
     period: { start: w.period.start, end: w.period.end, granularity: w.period.granularity, timezone: w.period.timezone },
     collected_at: new Date(w.published_at ?? w.computed_at ?? Date.now()).toISOString(),
@@ -49,6 +65,7 @@ export function weekToSubmission(w: Week) {
         obs("gross_profit_revenue_basis", w.totals.gross_profit_revenue_basis),
         obs("product_cost", w.totals.product_cost),
         obs("shipping_cost", w.totals.shipping_cost),
+        ...dayObs,
       ],
     },
     source_refs: [{ label: `Gross Profit week of ${w.period.week_start}, published revision ${w.revision}${w.completeness_reasons.length ? ` (${w.completeness_reasons.join(", ").replace(/_/g, " ")})` : ""}` }],
