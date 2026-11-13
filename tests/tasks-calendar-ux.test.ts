@@ -3,6 +3,7 @@ import { freshDb, call, q, closePool } from "./helpers";
 import { listTasks, type TaskFilters, mondayOf } from "../server/taskQuery";
 import { occasionAgenda } from "../server/routes/gifts";
 import { addDays } from "../shared/dates";
+import { taskLinkParams } from "../src/pages/Tasks";
 
 // A fixed "today" (a Thursday) keeps the views deterministic.
 const TODAY = "2027-03-11";
@@ -111,6 +112,30 @@ describe("Marketing Tasks views", () => {
     expect((await call("viewer", "PATCH", `/tasks/${seriesId}/occurrences/2027-03-15`, { status: "done" })).status).toBe(403);
     const trackerId = encodeURIComponent("tracker:tt-test:task:22222222-2222-4222-8222-222222222222");
     expect((await call("editor", "PATCH", `/tasks/${trackerId}`, { status: "done", version: 1 })).status).toBe(403);
+  });
+
+  it("gives each recurring occurrence its own link, and its drawer shows that occurrence's assignee, status and date", async () => {
+    const rows = (await listTasks(f({ view: "all", q: "Weekly social" }), TODAY)).items;
+    const a = rows.find((t) => t.occurrence === "2027-03-01")!, b = rows.find((t) => t.occurrence === "2027-03-15")!;
+    expect(taskLinkParams(a)).toEqual({ task: seriesId, occ: "2027-03-01" });
+    expect(new URLSearchParams(taskLinkParams(a) as any).toString()).not.toBe(new URLSearchParams(taskLinkParams(b) as any).toString());
+    // One-off and Task Tracker rows keep a plain task link.
+    const tracker = (await listTasks(f({ view: "all", source: ["tracker"] }), TODAY)).items.find((t) => t.occurrence)!;
+    expect(taskLinkParams(tracker).occ).toBeNull();
+
+    const reassigned = (await call("viewer", "GET", `/tasks/${seriesId}?occurrence=2027-03-01`)).body;
+    expect(reassigned.occurrence).toMatchObject({ due_date: "2027-03-01", owner: "Van Nguyen", status: "in_progress", owner_is_series_owner: false });
+    expect(reassigned.occurrence.owner).toBe(a.owner);
+    expect(reassigned.occurrence.status).toBe(a.status);
+    const untouched = (await call("viewer", "GET", `/tasks/${seriesId}?occurrence=2027-03-15`)).body;
+    expect(untouched.occurrence).toMatchObject({ due_date: "2027-03-15", owner: "Thao Nguyen", status: "todo", owner_is_series_owner: true });
+    const done = (await call("viewer", "GET", `/tasks/${seriesId}?occurrence=2027-03-08`)).body;
+    expect(done.occurrence.status).toBe("done");
+    expect(done.occurrence.completed_at).toBeTruthy();
+    // Without the date the series is returned as before; a date that isn't an occurrence is refused.
+    expect((await call("viewer", "GET", `/tasks/${seriesId}`)).body.occurrence).toBeNull();
+    expect((await call("viewer", "GET", `/tasks/${seriesId}?occurrence=2027-03-02`)).status).toBe(404);
+    expect((await call("viewer", "GET", `/tasks/${seriesId}?occurrence=2027-3-1`)).status).toBe(404);
   });
 });
 

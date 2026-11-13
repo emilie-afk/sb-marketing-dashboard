@@ -91,12 +91,20 @@ export function registerWork(r: Router) {
     const tracker = await trackerTaskItems({ business: b, owner, status, from, to });
     return { items: [...items.map((t) => ({ ...t, source: t.source ?? "dashboard", read_only: false })), ...tracker], window: { from, to }, today, tracker: await trackerFreshness() };
   });
-  r.get("/tasks/:id", async ({ params }) => {
+  r.get("/tasks/:id", async ({ params, url }) => {
     if (isTrackerId(params.id)) return trackerTaskDetail(params.id);
-    const t = await one<any>("select t.*, to_char(t.due_date,'YYYY-MM-DD') due_date from tasks t where id = $1", [params.id]);
+    const t = await one<any>("select t.*, to_char(t.due_date,'YYYY-MM-DD') due_date, to_char(t.recurrence_until,'YYYY-MM-DD') recurrence_until from tasks t where id = $1", [params.id]);
     if (!t) throw notFound("Task");
+    // One occurrence of a recurring task: its own date, assignee and status (falling back to the series owner and "To do").
+    const occDate = url.searchParams.get("occurrence");
+    let occurrence: any = null;
+    if (occDate) {
+      if (!isIsoDate(occDate) || !t.recurrence || !occurrences(t.recurrence, t.due_date, { start: occDate, end: occDate }, t.recurrence_until).length) throw notFound("Occurrence");
+      const o = await one<any>("select status, owner, completed_at from task_occurrences where task_id = $1 and due_date = $2", [params.id, occDate]);
+      occurrence = { due_date: occDate, status: o?.status ?? "todo", owner: o?.owner ?? t.owner, owner_is_series_owner: !o?.owner, completed_at: o?.completed_at ?? null };
+    }
     return {
-      task: t,
+      task: t, occurrence,
       links: await query("select * from task_links where task_id = $1", [params.id]),
       history: await query("select at, actor, changes, comment from task_updates where task_id = $1 order by at desc", [params.id]),
       files: await query("select id, filename, content_type, size_bytes, uploaded_by, uploaded_at from attachments where owner_type = 'task' and owner_id = $1", [params.id]),

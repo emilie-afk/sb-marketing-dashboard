@@ -82,7 +82,7 @@ Spreadsheet sync is one-way. Precedence when two sheets describe the same promot
 
 - Views: Needs attention (default; open tasks overdue or due today, grouped Overdue/Today), This week (Monday–Sunday), Upcoming (after this week, 4 weeks at a time), Completed (by completion date, due date as a labelled fallback), All tasks (includes undated; cancelled only through the Status filter). Dates are Vietnam calendar dates.
 - `GET /api/tasks?view=…` builds every task row first (one-off tasks, each recurring occurrence with its own assignee and status, and Task Tracker records) and then applies the filters (`business`, `assignee` with `__unassigned__`, `q`, `status`, `activity`, `source`, `kind`, `from`, `to`), so both sources follow the same filters and List and Board show the same results. Without `view` the endpoint keeps its earlier behaviour.
-- The view and filters live in the URL (`#/tasks?view=this_week&business=sb&assignee=…`), so a view can be bookmarked and Back returns to it; opening a task adds `task=` to the URL.
+- The view and filters live in the URL (`#/tasks?view=this_week&business=sb&assignee=…`), so a view can be bookmarked and Back returns to it; opening a task adds `task=` to the URL, and a recurring occurrence also adds its date (`occ=YYYY-MM-DD`), so each occurrence has its own link. Its drawer (`GET /api/tasks/:id?occurrence=YYYY-MM-DD`) shows that occurrence's assignee, status and due date; status changes there apply to that occurrence only, while links, files and updates belong to the whole routine.
 - Task Tracker occurrences are only available for the window of the latest snapshot; the page says so when the selected range starts earlier.
 
 ### Gift calendar

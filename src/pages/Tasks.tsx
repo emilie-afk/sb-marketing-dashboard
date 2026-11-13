@@ -11,6 +11,10 @@ const dayNum = (d: string) => Date.parse(`${d}T00:00:00Z`) / 864e5;
 const shortDate = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
 
 /** "Today", "Tomorrow", "3 days overdue", "In 5 days", always next to the actual date. */
+/** URL parameters that open one row: a dashboard occurrence is named by its date, so each occurrence has its own link. */
+export function taskLinkParams(t: { id: string; source: string; occurrence: string | null }) {
+  return { task: t.id, occ: t.source === "dashboard" && t.occurrence ? t.occurrence : null };
+}
 export function deadlineLabel(due: string | null, today: string, status: string) {
   if (!due) return { text: "No due date", tone: "" };
   const diff = dayNum(due) - dayNum(today), open = status !== "done" && status !== "cancelled";
@@ -23,6 +27,7 @@ export function TasksPage({ role }: { role: string }) {
   const view = VIEWS.some(([k]) => k === q.get("view")) ? q.get("view")! : "needs_attention";
   const layout = q.get("layout") === "board" ? "board" : "list";
   const openId = q.get("task");
+  const openOcc = q.get("occ");
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState(q.get("q") ?? "");
   useEffect(() => { setSearch(q.get("q") ?? ""); }, [q.get("q")]);
@@ -39,7 +44,8 @@ export function TasksPage({ role }: { role: string }) {
     } catch (e: any) { alert(e.message); }
   };
   const pushedOpen = useRef(false);
-  const openTask = (t: any) => { pushedOpen.current = true; setQ({ task: t.id }, { push: true }); };
+  // The link names the occurrence too, so two occurrences of one routine open (and bookmark) separately.
+  const openTask = (t: any) => { pushedOpen.current = true; setQ(taskLinkParams(t), { push: true }); };
   const statuses = (q.get("status") ?? "").split(",").filter(Boolean);
   const chips: [string, string][] = [];
   if (q.get("q")) chips.push(["q", `Search: “${q.get("q")}”`]);
@@ -93,7 +99,7 @@ export function TasksPage({ role }: { role: string }) {
             : layout === "list" ? <TaskList items={d.items} view={view} today={d.today} role={role} onOpen={openTask} onStatus={setStatus} />
             : <TaskBoard items={d.items} today={d.today} role={role} onOpen={openTask} onStatus={setStatus} />}
         </>; }}</Async>
-      {openId && <TaskDrawer key={openId} id={openId} role={role} onClose={() => { if (pushedOpen.current) { pushedOpen.current = false; history.back(); } else setQ({ task: null }); s.reload(); }} />}
+      {openId && <TaskDrawer key={`${openId}|${openOcc ?? ""}`} id={openId} occurrence={openOcc} role={role} onClose={() => { if (pushedOpen.current) { pushedOpen.current = false; history.back(); } else setQ({ task: null, occ: null }); s.reload(); }} />}
       {creating && <NewTask onClose={() => { setCreating(false); s.reload(); }} />}
     </div>
   );
@@ -182,8 +188,8 @@ function NewTask({ onClose }: { onClose: () => void }) {
     </form></Drawer>;
 }
 
-function TaskDrawer({ id, role, onClose }: { id: string; role: string; onClose: () => void }) {
-  const s = useApi<any>(`/tasks/${encodeURIComponent(id)}`, [id]);
+function TaskDrawer({ id, occurrence, role, onClose }: { id: string; occurrence?: string | null; role: string; onClose: () => void }) {
+  const s = useApi<any>(`/tasks/${encodeURIComponent(id)}${occurrence && !id.startsWith("tracker:") ? `?occurrence=${occurrence}` : ""}`, [id, occurrence]);
   const [comment, setComment] = useState("");
   if (id.startsWith("tracker:")) return <Drawer onClose={onClose}><Async s={s}>{(d) => <>
     <h2>{d.task.title}</h2>
@@ -195,8 +201,15 @@ function TaskDrawer({ id, role, onClose }: { id: string; role: string; onClose: 
   </>}</Async></Drawer>;
   return <Drawer onClose={onClose}><Async s={s}>{(d) => <>
     <h2>{d.task.title}</h2>
+    {d.occurrence ? <>
+      <p className="sub">One occurrence of a repeating task. Status changes here apply to this occurrence only; links, files and updates below belong to the whole routine.</p>
+      <dl className="kv"><dt>Business</dt><dd>{BUSINESS_NAMES[d.task.business_id]}</dd>
+        <dt>Assignee</dt><dd>{d.occurrence.owner ?? "Unassigned"}{d.occurrence.owner_is_series_owner ? <span className="sub"> (the routine's owner)</span> : <span className="sub"> (this occurrence; the routine's owner is {d.task.owner ?? "unassigned"})</span>}</dd>
+        <dt>Status</dt><dd>{role !== "viewer" ? <select aria-label="Occurrence status" value={d.occurrence.status} onChange={async (e) => { await api(`/tasks/${id}/occurrences/${d.occurrence.due_date}`, { method: "PATCH", json: { status: e.target.value } }); s.reload(); }}>{Object.entries(STATUS_LABEL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select> : (STATUS_LABEL[d.occurrence.status] ?? d.occurrence.status)}</dd>
+        <dt>Due</dt><dd>{shortDate(d.occurrence.due_date)}</dd>{d.occurrence.completed_at && <><dt>Completed</dt><dd>{when(d.occurrence.completed_at)}</dd></>}</dl>
+    </> :
     <dl className="kv"><dt>Business</dt><dd>{BUSINESS_NAMES[d.task.business_id]}</dd><dt>Assignee</dt><dd>{d.task.owner ?? "Unassigned"}</dd><dt>Status</dt><dd>{STATUS_LABEL[d.task.status] ?? d.task.status}</dd>
-      <dt>Due</dt><dd>{d.task.due_date ?? "Not set"}{d.task.recurrence ? ` (repeats ${d.task.recurrence})` : ""}</dd><dt>Source</dt><dd>{d.task.source === "finding_approval" ? "Created from an approved listing finding" : "Dashboard"}</dd></dl>
+      <dt>Due</dt><dd>{d.task.due_date ?? "Not set"}{d.task.recurrence ? ` (repeats ${d.task.recurrence})` : ""}</dd><dt>Source</dt><dd>{d.task.source === "finding_approval" ? "Created from an approved listing finding" : "Dashboard"}</dd></dl>}
     {d.task.description && <p>{d.task.description}</p>}
     <h3 style={{ marginTop: 12 }}>Links</h3>
     {d.links.length ? <ul className="list">{d.links.map((l: any) => <li key={l.id}>{l.target_type}: {l.url ? <a href={l.url} target="_blank" rel="noreferrer">{l.label ?? l.url}</a> : (l.label ?? l.target_id)}</li>)}</ul> : <p className="sub">None.</p>}
