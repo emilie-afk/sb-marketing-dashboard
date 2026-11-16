@@ -5,15 +5,25 @@ import { COMPARISON_LABELS } from "../shared/dates";
 
 export function MetricTile({ m }: { m: any }) {
   const cov = m.coverage;
+  const tz = m.timezone ? ` (${tzShort(m.timezone)})` : "";
+  const reason = m.value.state !== "missing" ? ""
+    : m.latest?.granularity === "week" ? "this source reports by week, and a week is never split into days."
+    : (m.value.note || (cov?.status === "unsupported" ? cov.reason : ""));
   return (
     <div className="metric">
       <div className="k">{m.label}</div>
       <div className={`v ${m.value.state !== "value" ? "na" : ""}`} title={m.value.note ?? ""}>{fmt({ ...m.value, flag: undefined }, m.unit)}</div>
+      {m.covered && <div className="asof" title="The dates this figure actually covers">Data: {range(m.covered)}{tz}</div>}
       {m.value.flag && <span className="chip warn">{m.value.flag}</span>}
-      {m.value.state !== "value" && m.value.note && <div className="sub">{m.value.state === "missing" ? "Unavailable: " : ""}{m.value.note}</div>}
+      {m.latest && (
+        <div className="latest">
+          Latest reported: <b>{fmt(m.latest.value, m.unit)}</b> for <b>{range(m.latest.period)}</b>{m.latest.granularity === "week" ? " (week)" : ""}.
+          {m.latest.outside?.length ? <> Not counted in this period: it includes {m.latest.outside.map((o: any) => range(o)).join(" and ")}.</> : null}
+        </div>
+      )}
+      {m.value.state !== "value" && m.value.note && m.value.state !== "missing" && m.value.note !== cov?.note && <div className="sub">{m.value.note}</div>}
+      {reason && <div className="sub">Unavailable for this period: {reason}</div>}
       {m.priorRange && <div className="d"><ChangeText c={m.change} unit={m.unit} /> <span className="sub">vs {range(m.priorRange)}</span></div>}
-      {m.covered && <div className="sub">Data: {range(m.covered)}{m.timezone ? ` (${tzShort(m.timezone)})` : ""}</div>}
-      {cov?.status === "unsupported" && <div className="sub">{cov.reason}</div>}
       {cov?.status === "gaps" && <div className="sub bad">{cov.note}</div>}
       {m.partialNote && <div className="sub">{m.partialNote}</div>}
     </div>
