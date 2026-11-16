@@ -3,6 +3,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { freshDb, call, closePool } from "./helpers";
 import { envelope } from "./fixtures/synthetic";
+import { applyPulled } from "../server/adapters/pullApply";
 
 beforeAll(async () => { await freshDb(); });
 afterAll(closePool);
@@ -33,18 +34,56 @@ describe("latest reported figure for a period that can't be answered", () => {
 });
 
 describe("default view is the latest full reporting week", () => {
-  it("uses the Saturday-to-Friday week of daily figures when it ends after the latest reported week", async () => {
+  // 2030-11-02 is a Saturday; weeks run Saturday to Friday.
+  const day = (d: number) => `2030-11-${String(d).padStart(2, "0")}`;
+  let post: (b: any) => Promise<any>;
+  /** Daily Analytics figures, as the sheet sync stores them: one submission per business and month. */
+  const daily = (business: "sb" | "p2s", tag: string, days: { day: string; value: number | null; state?: string }[]) =>
+    applyPulled({ schema_version: 1, submission_id: `dar:${business}:2030-11:${tag}`, source: "daily_analytics", business,
+      period: { start: "2030-11-01", end: "2030-11-30", granularity: "month", timezone: "America/Los_Angeles" },
+      collected_at: "2030-12-01T08:00:00Z", completeness: "complete",
+      records: { observations: days.map((d) => ({ metric: "revenue", scope: "all", period_start: d.day, period_end: d.day, granularity: "day", value: d.value, ...(d.state ? { state: d.state } : {}) })) } },
+      `dar:${business}:2030-11`, { sourceId: "sheet.daily_analytics", submitter: "sheet:test", submissionSource: "daily_analytics" }, "test");
+  const weekly = (id: string, period: { start: string; end: string }) =>
+    post({ ...envelope(id, "sb", period), records: { observations: [{ metric: "revenue", value: 5000 }] } });
+  const defaultPeriod = async () => (await call("viewer", "GET", "/business/sb/summary")).body.period;
+  const reset = async () => {
     await freshDb();
-    const token = (await call("admin", "POST", "/settings/automation-clients", { label: "Feeds", sources: ["weekly_report"], businesses: ["sb"] })).body.token as string;
-    const post = (b: any) => call(null, "POST", "/submissions", b, { authorization: `Bearer ${token}` });
-    const rev = (v: number) => ({ observations: [{ metric: "revenue", value: v }] });
-    expect((await post({ ...envelope("wk-1031", "sb", { start: "2030-10-26", end: "2030-11-01" }), records: rev(5000) })).status).toBe(201);
-    // 2030-11-02 is a Saturday: days Nov 2 to 10 → the full week Nov 2 to 8 (Fri), plus a partial next week.
-    for (let d = 2; d <= 10; d++) {
-      const day = `2030-11-${String(d).padStart(2, "0")}`;
-      expect((await post({ ...envelope(`day-${day}`, "sb", { start: day, end: day }, "day"), records: rev(100) })).status).toBe(201);
-    }
-    const r = await call("viewer", "GET", "/business/sb/summary");
-    expect(r.body.period).toMatchObject({ start: "2030-11-02", end: "2030-11-08" });
+    const token = (await call("admin", "POST", "/settings/automation-clients", { label: "Weekly", sources: ["weekly_report", "ads"], businesses: ["sb", "p2s"] })).body.token as string;
+    post = (b: any) => call(null, "POST", "/submissions", b, { authorization: `Bearer ${token}` });
+    expect((await weekly("wk-1026", { start: "2030-10-26", end: "2030-11-01" })).status).toBe(201);
+  };
+
+  it("uses a Sat-Fri week with seven Daily Analytics totals for one business when it ends after the latest weekly report", async () => {
+    await reset();
+    const r = await daily("sb", "full", Array.from({ length: 9 }, (_, i) => ({ day: day(2 + i), value: 100 })));
+    expect(r.outcome).toBe("accepted");
+    expect(await defaultPeriod()).toMatchObject({ start: day(2), end: day(8) });
+  });
+
+  it("does not stitch a week together from two businesses", async () => {
+    await reset();
+    await daily("sb", "half", [2, 3, 4, 5].map((d) => ({ day: day(d), value: 100 })));
+    await daily("p2s", "half", [6, 7, 8].map((d) => ({ day: day(d), value: 50 })));
+    expect(await defaultPeriod()).toMatchObject({ start: "2030-10-26", end: "2030-11-01" });
+  });
+
+  it("a day marked missing breaks the week; a reported zero does not", async () => {
+    await reset();
+    await daily("sb", "miss", [2, 3, 4, 5, 6, 7, 8].map((d) => (d === 5 ? { day: day(d), value: null, state: "missing" } : { day: day(d), value: 100 })));
+    expect(await defaultPeriod()).toMatchObject({ start: "2030-10-26", end: "2030-11-01" });
+    await reset();
+    await daily("sb", "zero", [2, 3, 4, 5, 6, 7, 8].map((d) => ({ day: day(d), value: d === 5 ? 0 : 100 })));
+    expect(await defaultPeriod()).toMatchObject({ start: day(2), end: day(8) });
+  });
+
+  it("ignores daily figures from other sources and weekly rows that aren't exactly Saturday to Friday", async () => {
+    await reset();
+    // Seven daily revenue rows from another source don't count as Daily Analytics totals.
+    for (const d of [2, 3, 4, 5, 6, 7, 8]) expect((await post({ ...envelope(`other-${d}`, "sb", { start: day(d), end: day(d) }, "day"), records: { observations: [{ metric: "revenue", value: 100 }] } })).status).toBe(201);
+    // A "week" that runs Monday to Sunday, and one that is eight days long, are not reporting weeks.
+    expect((await weekly("wk-mon", { start: day(4), end: day(10) })).status).toBe(201);
+    expect((await weekly("wk-long", { start: day(9), end: day(16) })).status).toBe(201);
+    expect(await defaultPeriod()).toMatchObject({ start: "2030-10-26", end: "2030-11-01" });
   });
 });

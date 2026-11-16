@@ -34,22 +34,30 @@ export function periodFromQuery(url: URL): { range: DateRange; compare: Comparis
 }
 
 /**
- * Default period: the latest full reporting week (Saturday to Friday) any business actually has data for: a reported
- * week, or a Saturday-to-Friday week whose seven days are all reported by day, whichever ends later. Falls back to
- * the latest month total, then the last seven reported days (never an invented range).
+ * Default period: the latest full reporting week (Saturday to Friday) one source reported in full for one business:
+ * - a weekly report total ("all" revenue) whose period is exactly Saturday to Friday, or
+ * - a Saturday-to-Friday week with all seven Daily Analytics revenue totals for the same business, each a reported
+ *   figure (a reported zero counts; a day marked missing does not),
+ * whichever ends later. Falls back to the latest month total, then the last seven reported days (never an invented range).
  */
 export async function defaultRange(): Promise<DateRange | null> {
   const w = await one<{ s: string; e: string }>(
-    `select to_char(period_start,'YYYY-MM-DD') s, to_char(period_end,'YYYY-MM-DD') e from observations
-      where status = 'active' and metric_key = 'revenue' and granularity = 'week' order by period_end desc limit 1`);
-  // Fridays ending a week of seven reported days, latest first.
+    `select to_char(o.period_start,'YYYY-MM-DD') s, to_char(o.period_end,'YYYY-MM-DD') e
+       from observations o join import_runs i on i.id = o.import_run_id
+      where o.status = 'active' and o.metric_key = 'revenue' and o.scope_key = 'all' and o.granularity = 'week' and o.value_state = 'value'
+        and i.submission_source = 'weekly_report'
+        and extract(isodow from o.period_start) = 6 and o.period_end = o.period_start + 6
+      order by o.period_end desc limit 1`);
   const dw = await one<{ e: string }>(
-    `select to_char(f, 'YYYY-MM-DD') e from (
-       select distinct period_start::date f from observations
-        where status = 'active' and metric_key = 'revenue' and granularity = 'day' and extract(isodow from period_start) = 5) fr
-      where (select count(distinct period_start) from observations o where o.status = 'active' and o.metric_key = 'revenue'
-               and o.granularity = 'day' and o.period_start between fr.f - 6 and fr.f) = 7
-      order by f desc limit 1`);
+    `with d as (
+       select business_id, period_start::date as d_day from observations
+        where status = 'active' and source_id = 'sheet.daily_analytics' and metric_key = 'revenue' and scope_key = 'all'
+          and granularity = 'day' and period_end = period_start and value_state = 'value' and value is not null
+        group by business_id, period_start)
+     select to_char(f.d_day, 'YYYY-MM-DD') e from d f
+      where extract(isodow from f.d_day) = 5
+        and (select count(*) from d x where x.business_id = f.business_id and x.d_day between f.d_day - 6 and f.d_day) = 7
+      order by f.d_day desc limit 1`);
   const fromDays = dw?.e ? { start: addDays(dw.e, -6), end: dw.e } : null;
   if (w || fromDays) return !w ? fromDays : !fromDays || w.e >= fromDays.end ? { start: w.s, end: w.e } : fromDays;
   const m = await one<{ s: string; e: string }>(
