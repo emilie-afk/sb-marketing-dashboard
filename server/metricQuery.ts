@@ -95,14 +95,36 @@ export async function metricValue(business: string, key: string, scope: string, 
   return { key, label: d.label, unit: d.unit, value, coverage: n.coverage.status !== "supported" ? n.coverage : m.coverage, timezone: n.timezone ?? m.timezone, covered: n.covered };
 }
 
-export type Compared = MetricResult & { prior: Fig; priorRange: DateRange | null; change: Change; partialNote?: string };
+export type Latest = { period: DateRange; granularity: string; value: Fig; outside: DateRange[] };
+export type Compared = MetricResult & { prior: Fig; priorRange: DateRange | null; change: Change; partialNote?: string; latest?: Latest };
+
+/**
+ * When a range can't be answered (e.g. the only week runs past it), the most recent reported period touching the
+ * range, with its own dates, so the page can show it clearly labelled instead of a bare "Missing". It is never
+ * counted toward the range. outside = the days of that period that fall outside the range.
+ */
+export async function latestFigure(business: string, key: string, scope: string, range: DateRange, cov: CoverageResult): Promise<Latest | undefined> {
+  if (cov.status !== "unsupported" || !cov.nearest?.length) return undefined;
+  const near = [...cov.nearest].sort((a, b) => (a.end < b.end ? 1 : -1));
+  for (const p of near) {
+    const r = await metricValue(business, key, scope, p);
+    if (r.value.state === "value" && r.value.value !== null && r.coverage.status === "supported") {
+      const outside: DateRange[] = [];
+      if (p.start < range.start) outside.push({ start: p.start, end: addDays(range.start, -1) });
+      if (p.end > range.end) outside.push({ start: addDays(range.end, 1), end: p.end });
+      return { period: p, granularity: r.coverage.granularity, value: r.value, outside };
+    }
+  }
+  return undefined;
+}
 
 /** Current vs comparison. For partial current coverage the comparison uses the same elapsed days. */
 export async function compared(business: string, key: string, scope: string, range: DateRange, kind: ComparisonKind | null): Promise<Compared> {
   const defs = await metricDefs();
   const d = defs.get(key)!;
   const cur = await metricValue(business, key, scope, range);
-  if (!kind) return { ...cur, prior: missing(), priorRange: null, change: change(cur.value, missing(), d.unit, d.good_direction) };
+  const latest = cur.value.state === "missing" ? await latestFigure(business, key, scope, range, cur.coverage) : undefined;
+  if (!kind) return { ...cur, prior: missing(), priorRange: null, change: change(cur.value, missing(), d.unit, d.good_direction), latest };
   let cmp: DateRange = comparisonPeriod(range, kind);
   let partialNote: string | undefined;
   if (cur.coverage.status === "gaps" || (cur.covered && cur.covered.end < range.end && cur.covered.start === range.start)) {
@@ -117,7 +139,7 @@ export async function compared(business: string, key: string, scope: string, ran
     }
   }
   const prior = await metricValue(business, key, scope, cmp);
-  return { ...cur, prior: prior.value, priorRange: cmp, change: change(cur.value, prior.value, d.unit, d.good_direction), partialNote };
+  return { ...cur, prior: prior.value, priorRange: cmp, change: change(cur.value, prior.value, d.unit, d.good_direction), partialNote, latest };
 }
 
 function lastContiguous(range: DateRange, missingDays: string[]): string | null {
