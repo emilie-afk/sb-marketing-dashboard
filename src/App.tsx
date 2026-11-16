@@ -7,10 +7,11 @@ import { TasksPage } from "./pages/Tasks";
 import { ReportsPage } from "./pages/Reports";
 import { ToolboxPage } from "./pages/Toolbox";
 import { SettingsPage } from "./pages/Settings";
+import { PlanningPage } from "./pages/Planning";
 
 const NAV: [string, string][] = [
   ["", "Marketing Overview"], ["sb", "Succulents Box"], ["p2s", "P2S"], ["perksradar", "Perksradar"],
-  ["calendar", "Marketing Calendar"], ["tasks", "Marketing Tasks"], ["reports", "Reports"], ["toolbox", "Toolbox"], ["settings", "Settings"],
+  ["calendar", "Marketing Calendar"], ["planning", "Planning"], ["tasks", "Marketing Tasks"], ["reports", "Reports"], ["toolbox", "Toolbox"], ["settings", "Settings"],
 ];
 
 export type Period = { start: string; end: string; compare: string } | null;
@@ -34,7 +35,8 @@ export function App() {
     switch (section) {
       case "": case undefined: return <Overview period={period} setPeriod={setPeriod} />;
       case "sb": case "p2s": case "perksradar": return <Business id={section} tab={sub} period={period} setPeriod={setPeriod} role={role} />;
-      case "calendar": return <CalendarPage role={role} />;
+      case "calendar": return <CalendarPage role={role} planningOwner={!!me.data.planningOwner} />;
+      case "planning": return <PlanningPage id={sub} />;
       case "tasks": return <TasksPage role={role} />;
       case "reports": return <ReportsPage role={role} />;
       case "toolbox": return <ToolboxPage />;

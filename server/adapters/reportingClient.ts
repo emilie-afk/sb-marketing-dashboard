@@ -83,3 +83,33 @@ async function readLimited(res: Response, limit: number, signal: AbortSignal, la
   }
   return Buffer.concat(chunks).toString("utf8");
 }
+
+export type SendResult = { status: number; body: any };
+/**
+ * Sends a JSON request (POST/PATCH/GET) and returns the status and parsed body, including error answers, so the
+ * caller can tell a refusal (4xx, nothing done) from an unknown outcome (timeout, network, 5xx). Same safety as
+ * getJson: https origin, no redirects, one deadline for the request and the body, size-limited body.
+ */
+export async function sendJson(origin: string, method: "GET" | "POST" | "PATCH", path: string, headers: Record<string, string>, body: unknown, label: string, timeoutMs = CLIENT_LIMITS.timeoutMs): Promise<SendResult> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const aborted = new Promise<never>((_, reject) => ctrl.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+  aborted.catch(() => {});
+  try {
+    const r = await Promise.race([fetchImpl(`${origin}${path}`, {
+      method, headers: { accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body), redirect: "manual", signal: ctrl.signal }), aborted]);
+    if (r.status >= 300 && r.status < 400) { await r.body?.cancel().catch(() => {}); throw new HttpError(502, "source_redirect", `${label} answered with a redirect, which is not followed.`); }
+    const text = await Promise.race([readLimited(r, 1024 * 1024, ctrl.signal, label), aborted]);
+    if (ctrl.signal.aborted) throw new Error("aborted");
+    let parsed: any = null;
+    try { parsed = text ? JSON.parse(text) : null; } catch { parsed = null; }
+    return { status: r.status, body: parsed };
+  } catch (e) {
+    if (ctrl.signal.aborted) throw new HttpError(504, "source_timeout", `${label} did not answer in time.`);
+    if (e instanceof HttpError) throw e;
+    throw new HttpError(502, "source_unreachable", `${label} could not be reached.`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
