@@ -135,6 +135,11 @@ export function GiftDrawer({ occasionId, year, business, role, onClose, onOpenPr
         <div className="sub">Campaign {p.start_date ? range({ start: p.start_date, end: p.end_date }) : "dates not set"}{p.prep_deadline ? ` · prep deadline ${p.prep_deadline}` : ""}</div>
         {p.tasks.length > 0 && <div className="sub">Tasks: {p.tasks.map((t: any) => `${t.title} (${t.status}${t.due_date ? `, due ${t.due_date}` : ""})`).join("; ")}</div>}
       </li>)}</ul> : <p className="sub">No promotions linked to this occasion{business ? ` for ${BUSINESS_NAMES[business]}` : ""} yet.</p>}
+      {(d.canPlan || d.plans.length > 0) && o.kind === "dated" && <><h3 style={{ marginTop: 14 }}>Plans for {d.year}</h3>
+        {d.plans.length ? <ul className="list">{d.plans.map((p: any) => <li key={p.id}><a href={`#/planning/${p.id}`}><b>{p.name}</b></a> <span className="chip">{BUSINESS_NAMES[p.business]}</span> <span className={`chip ${p.status === "draft" ? "muted" : ""}`}>{p.status === "draft" ? "Draft" : "Published"}</span>
+          <div className="sub">Campaign {range({ start: p.campaign_start, end: p.campaign_end })} · {p.task_count} assigned task{p.task_count === 1 ? "" : "s"}</div></li>)}</ul>
+          : <p className="sub"><span className="chip muted">No plan</span></p>}
+        {d.canPlan && <a className="btn small primary" href={`#/planning/new?gift=${o.id}&year=${d.year}${business ? `&business=${business}` : ""}`}>Plan this occasion</a>}</>}
       {canEdit && d.canCreate && mode === "view" && <div className="row" style={{ marginTop: 10 }}>
         <button className="btn small primary" onClick={() => setMode("create")}>Create promotion</button>
         <button className="btn small" onClick={() => setMode("link")}>Link an existing promotion</button>

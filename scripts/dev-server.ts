@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join, extname, normalize } from "node:path";
 import { createApp } from "../server/app";
-import { issueSession } from "../server/auth";
+import { issueSession, roleOf } from "../server/auth";
 import { isDeployedRuntime } from "../server/runtime";
 
 if (isDeployedRuntime()) throw new Error("dev-server is for local use only");
@@ -27,8 +27,11 @@ const port = Number(process.env.PORT ?? 8888);
 createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${port}`);
   if (devLogin && url.pathname === "/dev/login") {
+    // ?email= signs in as an approved TEAM_MEMBERS address (local testing of per-person rules such as the planning owner).
+    const asEmail = (url.searchParams.get("email") ?? "").toLowerCase();
     const role = ["viewer", "editor", "admin"].includes(url.searchParams.get("role") ?? "") ? url.searchParams.get("role") : "editor";
-    const token = await issueSession({ sub: `local-${role}`, email: `${role}@example.test` });
+    if (asEmail && !roleOf(asEmail)) { res.writeHead(403); return res.end("Not an approved TEAM_MEMBERS address."); }
+    const token = asEmail ? await issueSession({ sub: `local-${asEmail}`, email: asEmail }) : await issueSession({ sub: `local-${role}`, email: `${role}@example.test` });
     res.writeHead(302, { location: url.searchParams.get("next") ?? "/", "set-cookie": `mkd_session=${token}; Path=/; HttpOnly; SameSite=Lax` });
     return res.end();
   }

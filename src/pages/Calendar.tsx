@@ -14,9 +14,9 @@ function monthGrid(month: string) {
   return Array.from({ length: 42 }, (_, i) => addDays(start, i));
 }
 
-const VIEWS: [string, string][] = [["agenda", "Upcoming occasions"], ["month", "Month grid"], ["week", "Week"], ["list", "List"]];
+const VIEWS: [string, string][] = [["agenda", "Year agenda"], ["month", "Month grid"], ["week", "Week"], ["list", "List"]];
 
-export function CalendarPage({ role = "viewer" }: { role?: Role }) {
+export function CalendarPage({ role = "viewer", planningOwner = false }: { role?: Role; planningOwner?: boolean }) {
   const today = todayIn(OPERATIONS_TZ);
   const [q, setQ] = useHashQuery();
   const view = VIEWS.some(([k]) => k === q.get("view")) ? q.get("view")! : "agenda";
@@ -49,7 +49,7 @@ export function CalendarPage({ role = "viewer" }: { role?: Role }) {
         <button className={`chip ${seasonal ? "on" : ""}`} aria-pressed={seasonal} onClick={() => setQ({ seasonal: seasonal ? "0" : null })} title="Multi-week windows such as wedding season and back to school">Seasonal windows</button>
         {role !== "viewer" && <button className="btn small" onClick={() => setCreating(true)}>New promotion</button>}
       </div>
-      {view === "agenda" ? <Agenda q={q} setQ={setQ} today={today} business={business} seasonal={seasonal} onGift={setGift} onSheet={setSheetOcc} onPromotion={setOpen} /> : <>
+      {view === "agenda" ? <Agenda q={q} setQ={setQ} today={today} business={business} seasonal={seasonal} owner={planningOwner} onGift={setGift} onSheet={setSheetOcc} onPromotion={setOpen} /> : <>
       <div className="row legend" aria-label="Legend">{LEGEND.map(([k, l]) => <span key={k} className={`ev ${k}`}>{l}</span>)}<span className="ev gift season">Seasonal window</span></div>
       <Async s={s}>{(d) => <>
         <p className="sub">{d.timezoneNote} An occasion becomes a promotion only when it is selected for use.</p>
@@ -81,39 +81,69 @@ export function CalendarPage({ role = "viewer" }: { role?: Role }) {
 const TYPE_NAME: Record<string, string> = { gift: "Gift occasion", occasion: "Occasion", promotion: "Promotion", launch: "Launch", task: "Task", deadline: "Prep deadline" };
 const monthTitle = (m: string) => new Date(`${m}-01T00:00:00Z`).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
 
-function Agenda({ q, setQ, today, business, seasonal, onGift, onSheet, onPromotion }: any) {
-  const from = /^\d{4}-\d{2}-\d{2}$/.test(q.get("from") ?? "") ? q.get("from") : today;
-  const to = addDays(from, 89);
+/** Planning badges for one occasion: the owner sees No plan / Draft / Published and can start a plan; others see only plans they may see. */
+export function PlanBadges({ plans, owner, newHref }: { plans: any[]; owner: boolean; newHref: string | null }) {
+  if (!plans.length) return owner ? <div className="sub plan-badges"><span className="chip muted">No plan</span>{newHref && <> <a className="btn small" href={newHref}>Plan this occasion</a></>}</div> : null;
+  return <div className="sub plan-badges">{plans.map((p: any) => <span key={p.id} style={{ marginRight: 8 }}>
+    <a href={`#/planning/${p.id}`}><b>{p.name}</b></a> <span className="chip">{BUSINESS_NAMES[p.business] ?? p.business}</span> <span className={`chip ${p.status === "draft" ? "muted" : ""}`}>{p.status === "draft" ? "Draft" : "Published"}</span> <span className="sub">{p.task_count} assigned task{p.task_count === 1 ? "" : "s"}</span></span>)}
+    {owner && newHref && <a className="btn small" href={newHref}>Plan this occasion</a>}</div>;
+}
+const planHref = (it: any, business: string) => it.kind === "gift" ? `#/planning/new?gift=${it.occasionId}&year=${it.year}${business ? `&business=${business}` : ""}`
+  : it.ids?.length ? `#/planning/new?sheet=${it.ids[0].id}&business=${it.ids[0].business}` : null;
+
+function Agenda({ q, setQ, today, business, seasonal, owner, onGift, onSheet, onPromotion }: any) {
+  const thisYear = Number(today.slice(0, 4));
+  const next90 = q.get("range") === "next90";
+  const year = /^\d{4}$/.test(q.get("year") ?? "") ? Number(q.get("year")) : thisYear;
+  const from = next90 ? today : `${year}-01-01`, to = next90 ? addDays(today, 89) : `${year}-12-31`;
   const otype = q.get("otype") ?? "all";
-  const s = useApi<any>(`/occasions/agenda?from=${from}&to=${to}&type=${otype}${business ? `&business=${business}` : ""}${seasonal ? "" : "&seasonal=0"}`, [from, otype, business, seasonal]);
+  const s = useApi<any>(`/occasions/agenda?from=${from}&to=${to}&type=${otype}${business ? `&business=${business}` : ""}${seasonal ? "" : "&seasonal=0"}`, [from, to, otype, business, seasonal]);
   return <>
     <div className="row" style={{ marginBottom: 6 }}>
-      <b>{from === today ? "Next 90 days" : `90 days from ${new Date(`${from}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}`}</b>
-      <label className="sub">Jump to month <input type="month" value={from.slice(0, 7)} onChange={(e) => e.target.value && setQ({ from: `${e.target.value}-01` })} /></label>
-      {from !== today && <button className="btn small" onClick={() => setQ({ from: null })}>Back to next 90 days</button>}
+      <b>{next90 ? "Next 90 days" : `January to December ${year}`}</b>
+      <label className="sub">Year <select aria-label="Year" value={next90 ? "" : year} onChange={(e) => setQ({ year: e.target.value === String(thisYear) ? null : e.target.value, range: null })}>
+        {next90 && <option value="">Choose</option>}{[thisYear - 1, thisYear, thisYear + 1, thisYear + 2].map((y) => <option key={y} value={y}>{y}</option>)}</select></label>
+      {next90 ? <button className="btn small" onClick={() => setQ({ range: null })}>Full year</button> : <button className="btn small" onClick={() => setQ({ range: "next90", year: null })}>Next 90 days</button>}
+      {!next90 && <a className="sub" href="#" onClick={(e) => { e.preventDefault(); document.getElementById(`m-${today.slice(0, 7)}`)?.scrollIntoView({ behavior: "smooth" }); }}>Jump to this month</a>}
     </div>
     <Async s={s}>{(d) => {
-      if (!d.items.length) return <div className="state">No occasions in this range{business ? ` for ${BUSINESS_NAMES[business]}` : ""}. Try another month or occasion type.</div>;
+      if (!d.items.length) return <div className="state">No occasions in this range{business ? ` for ${BUSINESS_NAMES[business]}` : ""}. Try another year or occasion type.</div>;
       const months = new Map<string, any[]>();
       for (const it of d.items) { const m = (it.inProgress ? from : it.start).slice(0, 7); months.set(m, [...(months.get(m) ?? []), it]); }
       return <>
-        <p className="sub">{d.note} Routine tasks live in Marketing Tasks; preparation tasks for a campaign show inside its occasion.</p>
-        {[...months.entries()].map(([m, list]) => <section key={m}>
+        <p className="sub">{d.note} Routine tasks live in Marketing Tasks; a campaign's planned tasks show on its plan.</p>
+        {[...months.entries()].map(([m, list]) => <section key={m} id={`m-${m}`}>
           <h3 className="agenda-month">{monthTitle(m)}</h3>
           {list.map((it: any) => <div key={it.key} className="agenda-row">
             <div className="when">{it.tbc ? "Dates to be confirmed" : range({ start: it.start, end: it.end })}{it.inProgress ? <div className="sub">In progress</div> : null}</div>
             <div>
-              <a href="#" onClick={(e) => { e.preventDefault(); it.kind === "gift" ? onGift({ id: it.occasionId, year: it.year }) : onSheet(it); }}><b>{it.title}</b></a>
+              <a href="#" onClick={(e) => { e.preventDefault(); it.kind === "gift" ? onGift({ id: it.occasionId, year: it.year }) : onSheet({ ...it, owner }); }}><b>{it.title}</b></a>
               <span className={`ev ${it.kind === "gift" ? "gift" : "occasion"}${it.seasonal ? " season" : ""}`} style={{ display: "inline-block", marginLeft: 6 }}>{it.kind === "gift" ? (it.seasonal ? "Seasonal window" : "Gift occasion") : `Spreadsheet occasion${it.occasionType ? ` · ${it.occasionType}` : ""}`}</span>
               <div className="sub">{it.brands.map((b: string) => BUSINESS_NAMES[b] ?? b).join(" and ")}{it.monthLabel && it.seasonal ? ` · ${it.monthLabel}` : ""}</div>
               {it.leadIn && <div className="lead">{it.title} · {it.monthLabel} · {it.leadIn.replace(/^Start the campaign/, "Start planning")}</div>}
-              <div className="sub">{it.promotions.length ? <>Linked: {it.promotions.map((p: any, i: number) => <span key={p.id}>{i ? ", " : ""}<a href="#" onClick={(e) => { e.preventDefault(); onPromotion(p.id); }}>{p.title}</a> ({BUSINESS_NAMES[p.business]}, {p.status})</span>)}</> : "No linked promotion yet"}</div>
+              <div className="sub">{it.promotions.length ? <>Linked promotions: {it.promotions.map((p: any, i: number) => <span key={p.id}>{i ? ", " : ""}<a href="#" onClick={(e) => { e.preventDefault(); onPromotion(p.id); }}>{p.title}</a> ({BUSINESS_NAMES[p.business]}, {p.status})</span>)}</> : "No linked promotion yet"}</div>
+              <PlanBadges plans={it.plans ?? []} owner={owner} newHref={owner && !it.tbc ? planHref(it, business) : null} />
             </div>
           </div>)}
         </section>)}
       </>;
     }}</Async>
+    {!next90 && <YearRound business={business} year={year} />}
   </>;
+}
+
+/** Year-round gift ideas: not tied to a date, so they sit apart from the dated agenda. */
+function YearRound({ business, year }: { business: string; year: number }) {
+  const s = useApi<any[]>(`/gift-occasions?year=${year}`, [year]);
+  const list = (s.data ?? []).filter((o) => o.kind === "year_round" && (!business || o.brands.includes(business)));
+  if (!list.length) return null;
+  const cats = [...new Set(list.map((o) => o.category))];
+  return <section className="card flat" style={{ marginTop: 20 }}>
+    <h3 style={{ marginTop: 0 }}>Year-round gift ideas</h3>
+    <p className="sub">Not tied to a date. A campaign built on one of these uses its own dates.</p>
+    {cats.map((c) => <div key={c} style={{ marginBottom: 8 }}><b>{c}</b>
+      <div className="sub">{list.filter((o) => o.category === c).map((o) => `${o.name} (${o.brands.map((b: string) => BUSINESS_NAMES[b] ?? b).join(" and ")})`).join(" · ")}</div></div>)}
+  </section>;
 }
 
 function SheetOccasionDrawer({ occ, role, onClose, onOpenPromotion }: { occ: any; role: Role; onClose: () => void; onOpenPromotion: (id: string) => void }) {
@@ -125,6 +155,7 @@ function SheetOccasionDrawer({ occ, role, onClose, onOpenPromotion }: { occ: any
     <h3 style={{ marginTop: 14 }}>Linked promotions</h3>
     {occ.promotions.length ? <ul className="list">{occ.promotions.map((p: any) => <li key={p.id}><a href="#" onClick={(e) => { e.preventDefault(); onOpenPromotion(p.id); }}><b>{p.title}</b></a> <span className="chip">{BUSINESS_NAMES[p.business]}</span> <span className="chip muted">{p.status}</span><div className="sub">Open it to see its preparation tasks.</div></li>)}</ul> : <p className="sub">None yet.</p>}
     {role !== "viewer" && occ.ids.filter((x: any) => !x.selected).map((x: any) => <button key={x.id} className="btn small" style={{ marginRight: 6 }} onClick={async () => { try { await api(`/occasions/${x.id}/select`, { method: "POST" }); setMsg(`Promotion created for ${BUSINESS_NAMES[x.business]}.`); } catch (e: any) { setMsg(e.message); } }}>Use for a {BUSINESS_NAMES[x.business]} promotion</button>)}
+    {occ.plans && <><h3 style={{ marginTop: 14 }}>Plans</h3><PlanBadges plans={occ.plans} owner={!!occ.owner} newHref={occ.owner && occ.ids?.length ? `#/planning/new?sheet=${occ.ids[0].id}&business=${occ.ids[0].business}` : null} /></>}
     {msg && <p className="sub">{msg}</p>}
   </Drawer>;
 }

@@ -6,6 +6,7 @@ import { badRequest, notFound } from "../http";
 import { atLeast } from "../auth";
 import { occurrence, tbcText, monthName, type GiftRule } from "../../shared/giftCalendar";
 import { formatRange } from "../../shared/dates";
+import { plansByOccasion, isPlanningOwner } from "../planning";
 
 type Occ = { id: string; name: string; kind: "dated" | "year_round"; category: string | null; rule: GiftRule | null; month_label: string; timing_text: string;
   themes: string | null; lead_in: string | null; lead_in_month: number | null; seasonal: boolean; parent_id: string | null; brands: string[] };
@@ -117,12 +118,17 @@ export async function occasionAgenda(from: string, to: string, business: string 
 }
 
 export function registerGifts(r: Router) {
-  r.get("/occasions/agenda", async ({ url }) => {
+  r.get("/occasions/agenda", async ({ url, session }) => {
     const from = url.searchParams.get("from") ?? "", to = url.searchParams.get("to") ?? "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) throw badRequest("from and to must be dates, with to on or after from");
     if (Date.parse(to) - Date.parse(from) > 400 * 864e5) throw badRequest("Choose a range of at most 400 days");
     const type = url.searchParams.get("type");
-    return { from, to, items: await occasionAgenda(from, to, url.searchParams.get("business") || null, type === "gift" || type === "sheet" ? type : "all", url.searchParams.get("seasonal") !== "0"),
+    const items = await occasionAgenda(from, to, url.searchParams.get("business") || null, type === "gift" || type === "sheet" ? type : "all", url.searchParams.get("seasonal") !== "0");
+    // Plan badges: only plans this person may see (server-side rule), so counts never reveal hidden plans.
+    const plans = await plansByOccasion(session, [...new Set(items.filter((i) => i.kind === "gift").map((i) => i.year as number))],
+      items.filter((i) => i.kind === "sheet").flatMap((i) => i.ids.map((x: any) => x.id)));
+    for (const it of items) it.plans = it.kind === "gift" ? plans.get(`gift:${it.occasionId}:${it.year}`) ?? [] : it.ids.flatMap((x: any) => plans.get(`sheet:${x.id}`) ?? []);
+    return { from, to, items, planningOwner: isPlanningOwner(session),
       note: "Gift occasions are all-day U.S. dates. Campaign lead-ins are suggested start dates, separate from the occasion dates." };
   });
 
@@ -181,6 +187,8 @@ export function registerGifts(r: Router) {
       year, dates: x && !x.tbc ? { start: x.start, end: x.end } : null, datesText: year ? datesText(o, year, ovs.get(`${o.id}:${year}`)) : "Year-round",
       within: children.map((c) => ({ id: c.id, name: c.name, timing: c.timing_text, themes: c.themes, datesText: year ? datesText(c, year) : null })),
       promotions: promos, canCreate: atLeast(session, "editor"),
+      plans: year ? ((await plansByOccasion(session, [year], [])).get(`gift:${o.id}:${year}`) ?? []).filter((p) => !business || p.business === business) : [],
+      canPlan: isPlanningOwner(session),
     };
   });
 }

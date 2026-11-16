@@ -10,6 +10,8 @@ import { registerGifts } from "./routes/gifts";
 import { registerReviews } from "./routes/reviews";
 import { registerReports, storeAttachment } from "./routes/reports";
 import { registerSettings } from "./routes/settings";
+import { registerPlanning } from "./routes/planning";
+import { isPlanningOwner } from "./planning";
 import { clientFromRequest, assertClientMay } from "./automation";
 import { checkSubmission } from "../shared/submission";
 import { applySubmission } from "./imports";
@@ -24,6 +26,7 @@ export function createApp() {
   registerReviews(r);
   registerReports(r);
   registerSettings(r);
+  registerPlanning(r);
 
   return async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
@@ -40,7 +43,7 @@ export function createApp() {
       const session = await readSession(req);
       // DEMO_DATA_BANNER is set only by the local dev server, so synthetic data is never presented as live.
       const demo = process.env.DEMO_DATA_BANNER === "1";
-      if (path === "/me") return json(session ? { signedIn: true, email: session.email, role: session.role, demo } : { signedIn: false, demo });
+      if (path === "/me") return json(session ? { signedIn: true, email: session.email, role: session.role, planningOwner: isPlanningOwner(session), demo } : { signedIn: false, demo });
       if (!session) throw new HttpError(401, "unauthorized", "Sign in with an approved team account.");
 
       // Same-origin check for state-changing requests (cookies are SameSite=Lax; this blocks cross-site form posts).
