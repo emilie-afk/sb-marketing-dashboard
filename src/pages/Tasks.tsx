@@ -124,7 +124,7 @@ function StatusCell({ t, role, onStatus }: { t: any; role: string; onStatus: (t:
 function TaskRowView({ t, view, today, role, onOpen, onStatus, extra }: any) {
   const dl = deadlineLabel(t.due_date, today, t.status);
   return <tr>
-    <td><a href="#" onClick={(e) => { e.preventDefault(); onOpen(t); }}><b>{t.title}</b></a>{t.read_only && <span className="chip muted" style={{ marginLeft: 6 }}>Task Tracker</span>}{t.recurring && <span className="chip muted" style={{ marginLeft: 6 }}>Recurring</span>}{t.file_count > 0 && <span className="sub"> · {t.file_count} file(s)</span>}
+    <td><a href="#" onClick={(e) => { e.preventDefault(); onOpen(t); }}><b>{t.title}</b></a>{t.read_only && <span className="chip muted" style={{ marginLeft: 6 }}>Task Tracker</span>}{t.category && <span className="chip" style={{ marginLeft: 6 }}>{t.category}</span>}{t.recurring && <span className="chip muted" style={{ marginLeft: 6 }}>Recurring</span>}{t.file_count > 0 && <span className="sub"> · {t.file_count} file(s)</span>}
       {t.read_only && t.open_url && <> · <a href={t.open_url} target="_blank" rel="noopener noreferrer">Open in Task Tracker</a></>}{extra}</td>
     <td>{BUSINESS_NAMES[t.business_id]}</td><td>{t.activity}</td><td>{t.owner ?? "Unassigned"}{t.owner_archived ? <span className="sub"> (no longer on the team)</span> : null}</td>
     <td onClick={(e) => e.stopPropagation()}><StatusCell t={t} role={role} onStatus={onStatus} /></td>
@@ -160,7 +160,7 @@ function TaskBoard({ items, today, role, onOpen, onStatus }: any) {
     return <div key={k} className="col"><h4>{STATUS_LABEL[k]} <span className="chip muted">{list.length}</span></h4>
       {list.map((t: any) => { const dl = deadlineLabel(t.due_date, today, t.status);
         return <div key={t.key} className="tcard"><a href="#" onClick={(e) => { e.preventDefault(); onOpen(t); }}><b>{t.title}</b></a>
-          <div className="sub">{BUSINESS_NAMES[t.business_id]} · {t.owner ?? "Unassigned"}{t.read_only ? " · Task Tracker" : ""}{t.recurring ? " · Recurring" : ""}</div>
+          <div className="sub">{BUSINESS_NAMES[t.business_id]} · {t.owner ?? "Unassigned"}{t.read_only ? " · Task Tracker" : ""}{t.category ? ` · ${t.category}` : ""}{t.recurring ? " · Recurring" : ""}</div>
           <div className={`sub ${dl.tone}`}>{dl.text}</div>
           {t.read_only && t.open_url && <a className="sub" href={t.open_url} target="_blank" rel="noopener noreferrer">Open in Task Tracker</a>}
           {role !== "viewer" && !t.read_only && <div className="row" style={{ marginTop: 4 }}>{["todo", "in_progress", "done"].filter((x) => x !== k).map((x) => <button key={x} className="btn small" onClick={() => onStatus(t, x)}>{STATUS_LABEL[x]}</button>)}</div>}

@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, useApi, Async, range, BUSINESS_NAMES, useHashQuery, when, Drawer, Tabs } from "../lib";
 import { SlackReview } from "./SlackReview";
+import { CorporateTasks } from "./CorporateTasks";
 
 const STATUS_LABEL: Record<string, string> = { draft: "Draft", published: "Published" };
 const DELIVERY_LABEL: Record<string, string> = { not_sent: "Not sent yet", sending: "Sending…", created: "Created in Task Tracker", failed: "Needs retry", unknown: "No answer: retry to settle" };
@@ -13,21 +14,24 @@ const fmtDate = (d: string | null | undefined) => (d ? new Date(`${d}T00:00:00Z`
 export function PlanningPage({ id, sub }: { id?: string; sub?: string }) {
   const meta = useApi<any>("/planning/meta");
   if (!meta.data) return <Async s={meta}>{() => null}</Async>;
-  const tabs = <PlanningTabs owner={meta.data.owner} active={id === "review" ? "review" : "plans"} />;
+  const tabs = <PlanningTabs owner={meta.data.owner} active={id === "review" ? "review" : id === "corporate" ? "corporate" : "plans"} />;
+  if (id === "corporate") return <>{tabs}{meta.data.owner ? <CorporateTasks /> : <div className="state">Page not found.</div>}</>;
   if (id === "review") return <>{tabs}{meta.data.owner ? <SlackReview id={sub} /> : <div className="state">Page not found.</div>}</>;
   if (id === "new") return <>{tabs}<PlanEditor meta={meta.data} /></>;
   if (id) return <>{tabs}<PlanDetail id={id} meta={meta.data} /></>;
   return <>{tabs}<PlanList meta={meta.data} /></>;
 }
 
-/** Plans | Slack Review · N. The review tab and its count exist only for the planning owner (the server hides them from everyone else). */
-function PlanningTabs({ owner, active }: { owner: boolean; active: "plans" | "review" }) {
+/** Plans | Slack Review · N | Corporate Gifts · N. The review tabs and counts exist only for the planning owner (the server hides them from everyone else). */
+function PlanningTabs({ owner, active }: { owner: boolean; active: "plans" | "review" | "corporate" }) {
   const count = useApi<any>(owner ? "/review/summary" : null);
   // Slack Review actions announce a change so the count stays right without a page reload.
   useEffect(() => { const f = () => count.reload(); window.addEventListener("slack-review-changed", f); return () => window.removeEventListener("slack-review-changed", f); }, [count.reload]);
+  const cg = useApi<any>(owner ? "/review/corporate/summary" : null);
+  useEffect(() => { const f = () => cg.reload(); window.addEventListener("corporate-tasks-changed", f); return () => window.removeEventListener("corporate-tasks-changed", f); }, [cg.reload]);
   if (!owner) return null;
-  return <Tabs tabs={[["plans", "Plans"], ["review", `Slack Review${count.data ? ` · ${count.data.pending}` : ""}`]]} value={active}
-    onChange={(v) => { location.hash = v === "review" ? "#/planning/review" : "#/planning"; }} />;
+  return <Tabs tabs={[["plans", "Plans"], ["review", `Slack Review${count.data ? ` · ${count.data.pending}` : ""}`], ["corporate", `Corporate Gifts${cg.data ? ` · ${cg.data.pending}` : ""}`]]} value={active}
+    onChange={(v) => { location.hash = v === "review" ? "#/planning/review" : v === "corporate" ? "#/planning/corporate" : "#/planning"; }} />;
 }
 
 // ====================================================================== list and timeline

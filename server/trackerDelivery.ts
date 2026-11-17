@@ -11,7 +11,7 @@
 import { query } from "./db";
 import { createTrackerTask, readTrackerTasks, sentAtNow, type Directory, type TrackerTask } from "./adapters/planningClient";
 
-export type DeliveryTable = "plan_assignments" | "review_suggestions";
+export type DeliveryTable = "plan_assignments" | "review_suggestions" | "corporate_task_drafts";
 export type Claimed = {
   id: string;
   business: string;                      // dashboard business the task belongs to

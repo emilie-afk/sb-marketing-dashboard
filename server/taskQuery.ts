@@ -21,6 +21,7 @@ export type TaskRow = {
   owner: string | null; owner_archived: boolean; status: string; due_date: string | null; completed_on: string | null; completed_basis: "completion" | "due_date" | null;
   source: "dashboard" | "tracker"; read_only: boolean; open_url: string | null; recurring: boolean; recurrence: string | null;
   promotion_id: string | null; promotion_title: string | null; version: number | null; file_count: number;
+  category?: string | null;      // "Corporate Gifts" for Task Tracker tasks created from Corporate Gifts
 };
 
 const vnDate = (ts: string | Date | null) => (ts ? todayIn(OPERATIONS_TZ, new Date(ts)) : null);
@@ -70,7 +71,8 @@ export async function gatherTasks(business: string | null, from: string, to: str
   }
   const tracker = await query<any>(
     `select source_instance, record_id, task_id, kind, business_id, title, task_type, assignee_name, assignee_archived, recurrence,
-            to_char(due_date,'YYYY-MM-DD') due_date, to_char(occurrence_date,'YYYY-MM-DD') occurrence_date, status, to_char(completed_on,'YYYY-MM-DD') completed_on
+            to_char(due_date,'YYYY-MM-DD') due_date, to_char(occurrence_date,'YYYY-MM-DD') occurrence_date, status, to_char(completed_on,'YYYY-MM-DD') completed_on,
+            exists (select 1 from corporate_task_drafts cg where cg.tracker_task_id = tracker_task_records.task_id) as corporate
        from tracker_task_records
       where removed_at is null and ($1::text is null or business_id = $1)
         and (kind = 'task' or occurrence_date between $2 and $3)
@@ -82,7 +84,7 @@ export async function gatherTasks(business: string | null, from: string, to: str
       owner: r.assignee_name, owner_archived: r.assignee_archived, status: r.status === "done" ? "done" : "todo", due_date: r.due_date,
       completed_on: r.status === "done" ? r.completed_on ?? r.due_date : null, completed_basis: r.status === "done" ? (r.completed_on ? "completion" : r.due_date ? "due_date" : null) : null,
       source: "tracker", read_only: true, open_url: openUrl(r.task_id), recurring: !!occurrence, recurrence: r.recurrence,
-      promotion_id: null, promotion_title: null, version: null, file_count: 0 });
+      promotion_id: null, promotion_title: null, version: null, file_count: 0, category: r.corporate ? "Corporate Gifts" : null });
   }
   void today;
   return rows;
