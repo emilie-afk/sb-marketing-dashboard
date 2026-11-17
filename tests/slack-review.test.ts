@@ -71,7 +71,8 @@ const msg = (over: Record<string, unknown> = {}) => {
     excerpt: "Synthetic: please refresh the holiday gift guide banner before Friday", title: "Refresh the holiday gift guide banner", brief: "Update the banner for the holiday gift guide.", ...over };
 };
 let batchN = 0;
-const batch = (suggestions: any[], over: Record<string, unknown> = {}) => ({ batch_id: `batch-${++batchN}-test`, channel_id: CHANNEL, range: { from_ts: null, to_ts: `${ts}.000100` }, checkpoint_ts: `${ts}.000100`, skipped_count: 0, suggestions, ...over });
+const OVERLAP = "1700000000.000100";   // starts well before any checkpoint (overlap is allowed)
+const batch = (suggestions: any[], over: Record<string, unknown> = {}) => ({ batch_id: `batch-${++batchN}-test`, channel_id: CHANNEL, range: { from_ts: OVERLAP, to_ts: `${ts}.000100` }, checkpoint_ts: `${ts}.000100`, skipped_count: 0, suggestions, ...over });
 const first = async () => (await owner("GET", "/review/suggestions?status=all")).body.items;
 const fill = async (id: string, over: Record<string, unknown> = {}) => {
   const cur = (await owner("GET", `/review/suggestions/${id}`)).body.suggestion;
@@ -130,9 +131,34 @@ describe("scanner intake", () => {
     expect((await scan("POST", "/review-intake/batches", retry)).status).toBe(201);
     expect((await scan("GET", "/review-intake/checkpoint")).body.checkpoint_ts).not.toBe(cp);
     // An older checkpoint never moves it backwards.
-    const old = await scan("POST", "/review-intake/batches", batch([], { range: { from_ts: null, to_ts: "1700000000.000100" }, checkpoint_ts: "1700000000.000100" }));
+    const old = await scan("POST", "/review-intake/batches", batch([], { range: { from_ts: OVERLAP, to_ts: "1700000000.000100" }, checkpoint_ts: "1700000000.000100" }));
     expect(Number(old.body.checkpoint_ts)).toBeGreaterThan(1_700_000_000);
     expect((await first()).length).toBe(before + 2);
+  });
+
+  it("refuses a batch that would leave a gap after the saved checkpoint, and stores nothing from it", async () => {
+    const cp = (await scan("GET", "/review-intake/checkpoint")).body.checkpoint_ts;
+    expect(cp).toBeTruthy();
+    const before = (await first()).length;
+    const after = (d: number) => `${BigInt(cp.split(".")[0]) + BigInt(d)}.000100`;
+    // Starts after the checkpoint: the messages in between were never read.
+    const gap = batch([msg()], { range: { from_ts: after(5), to_ts: after(10) }, checkpoint_ts: after(10) });
+    const r = await scan("POST", "/review-intake/batches", gap);
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe("checkpoint_gap");
+    // No start at all once a checkpoint exists is a gap too.
+    const nostart = batch([msg()], { range: { from_ts: null, to_ts: after(10) }, checkpoint_ts: after(10) });
+    expect((await scan("POST", "/review-intake/batches", nostart)).status).toBe(409);
+    // One microsecond after the checkpoint is still a gap (exact comparison, not floating point).
+    const micro = `${cp.split(".")[0]}.${String(Number(cp.split(".")[1]) + 1).padStart(6, "0")}`;
+    expect((await scan("POST", "/review-intake/batches", batch([], { range: { from_ts: micro, to_ts: after(10) }, checkpoint_ts: after(10) }))).status).toBe(409);
+    expect((await scan("GET", "/review-intake/checkpoint")).body.checkpoint_ts).toBe(cp);
+    expect((await first()).length).toBe(before);
+    // Starting exactly at the checkpoint is accepted, and so is a retry of the refused batch's id once it is fixed.
+    const ok = await scan("POST", "/review-intake/batches", { ...gap, range: { from_ts: cp, to_ts: after(10) } });
+    expect(ok.status).toBe(201);
+    expect(ok.body.checkpoint_ts).toBe(after(10));
+    expect((await first()).length).toBe(before + 1);
   });
 
   it("a follow-up attaches to its suggestion and never overwrites Emilie's edits or reopens reviewed suggestions", async () => {

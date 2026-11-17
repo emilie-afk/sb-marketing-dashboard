@@ -74,7 +74,8 @@ const batchIn = z.object({
   skipped_count: z.number().int().min(0).max(10_000).default(0),
   suggestions: z.array(suggestionIn).max(200),
 }).strict();
-const tsNum = (ts: string) => Number(ts);
+// Slack ts "seconds.micros" (always 6 decimals, validated by TS) compared exactly, not as floating point.
+const tsNum = (ts: string) => BigInt(ts.replace(".", ""));
 
 export async function handleReviewIntake(req: Request, path: string): Promise<Response> {
   await hit({ bucket: `review-intake:${clientKey(req)}`, limit: 120, windowSec: 3600 });
@@ -95,6 +96,11 @@ export async function handleReviewIntake(req: Request, path: string): Promise<Re
       const st = (await c.query("select checkpoint_ts from review_scan_state where channel_id = $1 for update", [channel])).rows[0];
       const prior = (await c.query("select created_count, followup_count, unchanged_count, skipped_count from review_scan_batches where batch_id = $1", [b.batch_id])).rows[0];
       if (prior) return { replayed: true, ...prior, checkpoint_ts: st.checkpoint_ts };
+      // No gaps: once a checkpoint exists, a batch must have been read from at or before it (overlap is fine; rescans
+      // never duplicate). Otherwise messages between the checkpoint and from_ts would be skipped for good.
+      // Nothing is stored and the checkpoint stays where it was.
+      if (st.checkpoint_ts && (!b.range.from_ts || tsNum(b.range.from_ts) > tsNum(st.checkpoint_ts)))
+        throw new HttpError(409, "checkpoint_gap", "The batch must start at or before the saved checkpoint.", [{ field: "range.from_ts", message: `must be at or before ${st.checkpoint_ts}` }]);
       let created = 0, followups = 0, unchanged = 0;
       for (const s of b.suggestions) {
         const key = `slack:${channel}:${s.message_ts}:${s.action_id}`;

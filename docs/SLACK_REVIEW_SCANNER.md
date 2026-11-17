@@ -43,10 +43,12 @@ dashboard.
      short `scanner_note`.
    - `action_id` must stay the same for the same action on every rescan (number actions in the order they appear).
 5. Submit one batch: `POST /api/review-intake/batches` with a `batch_id` unique to this run (reuse it on retry),
-   `range` = what was read, `checkpoint_ts` = the newest ts fully processed, `skipped_count`, and the suggestions.
+   `range` = what was read (`from_ts` = the checkpoint you started from, or the configured start on the first run),
+   `checkpoint_ts` = the newest ts fully processed, `skipped_count`, and the suggestions.
    - On a network error or 5xx, retry **the same batch with the same `batch_id`**. Retries never duplicate.
    - The checkpoint advances only when the batch is accepted. If submission fails, the next run starts from the old
      checkpoint and resubmits; existing suggestions are left unchanged (never overwritten, never reopened).
+   - On 409 `checkpoint_gap`, the run started after the saved checkpoint: re-read the checkpoint and scan again from it.
    - On 422, fix the named fields; on 401/403/503, stop and report.
 6. Report: counts (found, submitted, follow-ups, skipped, unchanged) and error codes. **No message text** in reports,
    logs or notifications.

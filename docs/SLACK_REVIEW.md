@@ -84,9 +84,13 @@ accepted yet; the scanner then starts from its configured start point.
 
 - `batch_id` makes the batch idempotent: resubmitting the same id returns `already_accepted` with the original counts.
 - The checkpoint advances in the same transaction that accepts the batch, and never moves backwards.
+- **No gaps:** once a checkpoint exists, `range.from_ts` is required and must be at or before it (overlapping is fine;
+  rescanned messages are never duplicated). A batch starting after the checkpoint is refused with
+  `409 checkpoint_gap`, stores nothing, and leaves the checkpoint unchanged. Before the first accepted batch,
+  `from_ts` may be the configured start point or null.
 - `followup_of` names an earlier source key; the message is attached to that suggestion instead of creating a new one.
 - Answer (201, or 200 for a replay): `{ outcome, created_count, followup_count, unchanged_count, skipped_count, checkpoint_ts }`.
-- Errors: 401 bad credential, 403 wrong channel, 422 invalid batch (field names only, no text echoed), 503 not configured.
+- Errors: 401 bad credential, 403 wrong channel, 409 checkpoint_gap, 422 invalid batch (field names only, no text echoed), 503 not configured.
 
 ## Setup and rollback
 
