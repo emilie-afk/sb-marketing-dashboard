@@ -80,3 +80,35 @@ export async function pullCorporateGifting(actor = CG_SUBMITTER) {
   });
   return { outcome: problems.length ? "incomplete" as const : "done" as const, results, problems };
 }
+
+// All-time corporate sample box signups, read from the Corporate Gifting app (the only source; the signup rows and
+// contact details stay in its private Google Sheet). Count only. Not tied to the dashboard's date filter, and
+// independent of CORPORATE_GIFTING_PULL_ENABLED (that switch governs the monthly figures pull). A successful count
+// is cached for two minutes so page views stay well inside the source's reporting rate limit; a failure is never
+// cached and never shown as zero.
+const sampleSignupsSchema = z.object({
+  ok: z.literal(true),
+  schema_version: z.literal(1),
+  count: z.number().int().nonnegative(),
+  checked_at: z.string().optional(),
+});
+export type SampleSignups = { count: number; checked_at: string | null } | { count: null; reason: "not_configured" | "unavailable" };
+const SAMPLE_CACHE_MS = 2 * 60_000;
+let sampleCache: { at: number; value: { count: number; checked_at: string | null } } | null = null;
+/** Tests only. */
+export function _clearSampleSignupsCache() { sampleCache = null; }
+
+export async function corporateSampleSignups(now = Date.now()): Promise<SampleSignups> {
+  if (!corporateGiftingCredentials()) return { count: null, reason: "not_configured" };
+  if (sampleCache && now - sampleCache.at < SAMPLE_CACHE_MS) return sampleCache.value;
+  try {
+    const origin = originOf(process.env.CORPORATE_GIFTING_API_URL)!;
+    const headers = { authorization: `Bearer ${process.env.CORPORATE_GIFTING_REPORTING_SECRET}` };
+    const report = sampleSignupsSchema.parse(await getJson(origin, "/api/reporting/v1/sample-signups", headers, "Corporate Gifting sample signups"));
+    const value = { count: report.count, checked_at: report.checked_at ?? null };
+    sampleCache = { at: now, value };
+    return value;
+  } catch {
+    return { count: null, reason: "unavailable" };
+  }
+}
