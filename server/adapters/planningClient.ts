@@ -53,13 +53,14 @@ export type CreateOutcome =
   | { kind: "refused"; status: number; code: string; message: string; task_exists: false | null; fenced_through: string | null }
   | { kind: "unknown"; message: string };                                     // may or may not exist: retry with the same key
 
-export async function createTrackerTask(input: { key: string; plan_id: string; brand_id: string; assignee_id: string; title: string; brief: string; due_date: string; sent_at: string; supersedes_sent_at: string | null }): Promise<CreateOutcome> {
+export async function createTrackerTask(input: { key: string; plan_id: string; brand_id: string; assignee_id: string; title: string; brief: string; due_date: string; sent_at: string; supersedes_sent_at: string | null; origin?: "plan" | "review" }): Promise<CreateOutcome> {
   const c = cfg();
   let r;
   try {
     r = await sendJson(c.origin, "POST", "/api/planning/v1/tasks", c.headers, {
       idempotency_key: input.key, plan_id: input.plan_id, brand_id: input.brand_id, assignee_id: input.assignee_id, title: input.title, brief: input.brief || null, due_date: input.due_date,
       sent_at: input.sent_at, supersedes_sent_at: input.supersedes_sent_at,
+      ...(input.origin && input.origin !== "plan" ? { origin: input.origin } : {}),
     }, LABEL, PLANNING_TIMEOUT_MS);
   } catch (e: any) {
     return { kind: "unknown", message: e?.message ?? "Task Tracker could not be reached." };
