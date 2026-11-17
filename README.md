@@ -10,7 +10,7 @@ An internal workspace for the Succulents Box marketing team. It brings performan
 
 ## Connected projects
 
-The Dashboard can pull reporting from these projects when configured.
+The Dashboard can incorporate reporting from these projects when configured.
 
 | Project | What it contributes |
 | --- | --- |
