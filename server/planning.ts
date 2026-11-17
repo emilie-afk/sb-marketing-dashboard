@@ -15,6 +15,7 @@ import type { Session } from "./auth";
 import { addDays, daysInMonth, todayIn, OPERATIONS_TZ, isIsoDate, formatRange } from "../shared/dates";
 import { createTrackerTask, sentAtNow, readTrackerTasks, changeTrackerDueDate, trackerDirectory, planningTrackerConfigured, type TrackerTask, type Directory } from "./adapters/planningClient";
 import { trackerOrigin } from "./adapters/taskTracker";
+import { deliverClaimed, checkAgainstDirectory, idempotencyKey, storeTask as storeTaskIn, setDelivery as setDeliveryIn } from "./trackerDelivery";
 
 export const CHANNELS = ["Email", "Facebook", "Instagram", "LinkedIn", "Pinterest", "TikTok", "YouTube", "Google Ads", "Website", "Amazon", "Etsy", "Faire", "PR", "Other"] as const;
 export const PLAN_BUSINESSES = ["sb", "p2s", "perksradar"] as const;
@@ -205,12 +206,7 @@ async function directoryOrNull(): Promise<Directory | null> {
 }
 
 function checkAssignmentAgainst(dir: Directory, business: string, a: { tracker_brand_id: string; tracker_assignee_id: string }) {
-  const b = dir.brands.find((x) => x.id === a.tracker_brand_id);
-  if (!b) return { ok: false as const, code: "invalid_brand", message: "That Task Tracker brand is not available to plans." };
-  if (b.business_id !== business) return { ok: false as const, code: "invalid_brand", message: `${b.name} belongs to another dashboard business.` };
-  const p = dir.people.find((x) => x.id === a.tracker_assignee_id);
-  if (!p || !p.brand_ids.includes(b.id)) return { ok: false as const, code: "invalid_assignee", message: p ? `${p.name} cannot be assigned tasks in ${b.name}.` : "That person cannot be assigned tasks in Task Tracker." };
-  return { ok: true as const, brand: b, person: p };
+  return checkAgainstDirectory(dir, business, { brand_id: a.tracker_brand_id, assignee_id: a.tracker_assignee_id });
 }
 
 async function writeAssignments(c: pg.PoolClient, planId: string, business: string, list: AsgInput[], dir: Directory | null) {
@@ -323,7 +319,7 @@ export async function deletePlan(s: Session, id: string) {
 }
 
 // ------------------------------------------------------------ what is sent to Task Tracker
-export const idempotencyKey = (assignmentId: string) => `mkp:${assignmentId}`;
+export { idempotencyKey };
 
 /** The brief the assignee gets: their own task plus the campaign facts needed to do it. Objective, notes and other assignments are not sent. */
 export function briefFor(p: any, a: { brief: string | null }) {
@@ -363,10 +359,7 @@ export async function previewSend(s: Session, id: string) {
   };
 }
 
-const storeTask = (_c: null, id: string, t: TrackerTask) => query(
-  `update plan_assignments set delivery_status = 'created', delivery_error = null, tracker_task_id = $2, tracker_version = $3, tracker_title = $4, tracker_due_date = $5,
-          tracker_status = $6, tracker_assignee_name_now = $7, tracker_updated_at = $8, tracker_read_at = now() where id = $1`,
-  [id, t.task_id, t.version, t.title, t.due_date, t.status, t.assignee.name, t.updated_at]);
+const storeTask = (_c: null, id: string, t: TrackerTask) => storeTaskIn("plan_assignments", id, t);
 
 /**
  * Publish (if still a draft) and send every assignment not yet created. Each assignment is sent on its own with its
@@ -430,43 +423,9 @@ export async function sendPending(planId: string) {
       const claim = await claimForSend(planId, row.id);
       if (!claim) continue;                                   // removed by an edit before the send started, or created meanwhile
       const { plan: p, a, previous, highestSentAt, fencedThrough } = claim;
-      const unresolved = previous === "sending" || previous === "unknown";
-      if (unresolved) {
-        // Reconcile by the assignment id first: it may already exist from the unanswered attempt.
-        const prior = await readTrackerTasks([idempotencyKey(a.id)]).catch(() => null);
-        if (prior && prior[0]) { await storeTask(null, a.id, prior[0]); results.push({ assignment_id: a.id, outcome: "created", existing: true }); continue; }
-        if (prior === null) { await setDelivery(a.id, "unknown", "Task Tracker could not be checked. Retry later; no second task can be created."); results.push({ assignment_id: a.id, outcome: "unknown", message: "Task Tracker could not be checked." }); continue; }
-      }
-      // Validate the Tracker brand and assignee before sending (the tracker validates again). An unresolved send is
-      // never refused here: only Task Tracker's own answer to the same id can settle it, so it is always sent.
-      if (dir && !unresolved) {
-        const chk = checkAssignmentAgainst(dir, p.business_id, a);
-        if (!chk.ok) { await setDelivery(a.id, "failed", chk.message); results.push({ assignment_id: a.id, outcome: "failed", code: chk.code, message: chk.message }); continue; }
-      }
-      // sent_at is after every earlier attempt and after Task Tracker's fence for this assignment (whatever this server's
-      // clock says), and the greatest one sent is stored before the request leaves. The earlier unanswered attempt's
-      // sent_at goes along as supersedes_sent_at, so a "no task" answer fences it off too.
-      const after = (iso: string | null) => (iso ? Date.parse(iso) + 1 : 0);
-      const sentAt = new Date(Math.max(Date.parse(sentAtNow()), after(highestSentAt), after(fencedThrough))).toISOString();
-      await query("update plan_assignments set highest_sent_at = greatest(coalesce(highest_sent_at, $2::timestamptz), $2::timestamptz) where id = $1", [a.id, sentAt]);
-      const out = await createTrackerTask({ key: idempotencyKey(a.id), plan_id: planId, brand_id: a.tracker_brand_id, assignee_id: a.tracker_assignee_id, title: a.title, brief: briefFor(p, a), due_date: a.due_date,
-        sent_at: sentAt, supersedes_sent_at: highestSentAt });
-      if (out.kind === "created") { await storeTask(null, a.id, out.task); results.push({ assignment_id: a.id, outcome: "created", existing: !out.created }); }
-      else if (out.kind === "refused") {
-        if (out.fenced_through) await query("update plan_assignments set fenced_through = greatest(coalesce(fenced_through, $2::timestamptz), $2::timestamptz) where id = $1", [a.id, out.fenced_through]);
-        // After an unanswered attempt, a refusal settles the assignment only if Task Tracker explicitly confirms that no
-        // task exists for its id AND returns a fence (stored in its database under the assignment's lock) at or after the
-        // greatest sent_at of every earlier attempt. Task Tracker refuses any request sent at or before the fence on any
-        // server instance, so no earlier attempt can create a task afterwards. Anything else (e.g. key_unavailable: a task
-        // exists outside the credential's businesses) keeps it unresolved and locked.
-        const settled = !unresolved || (out.task_exists === false && out.fenced_through !== null && (highestSentAt === null || Date.parse(out.fenced_through) >= Date.parse(highestSentAt)));
-        if (settled) { await setDelivery(a.id, "failed", out.message); results.push({ assignment_id: a.id, outcome: "failed", code: out.code, message: out.message }); }
-        else {
-          const msg = out.task_exists === false ? `${out.message} Task Tracker has no task for it, but did not confirm that earlier attempts are fenced off; it stays locked.` : `${out.message} A task may exist for this assignment; it stays locked until Task Tracker returns it or confirms there is none.`;
-          await setDelivery(a.id, "unknown", msg); results.push({ assignment_id: a.id, outcome: "unknown", code: out.code, message: msg });
-        }
-      }
-      else { await setDelivery(a.id, "unknown", `${out.message} It may have been created. Retry or Check Task Tracker settles it by its id; a second task is never created.`); results.push({ assignment_id: a.id, outcome: "unknown", message: out.message }); }
+      const r = await deliverClaimed("plan_assignments", { id: a.id, business: p.business_id, previous, highestSentAt, fencedThrough,
+        payload: { brand_id: a.tracker_brand_id, assignee_id: a.tracker_assignee_id, title: a.title, brief: briefFor(p, a), due_date: a.due_date } }, planId, "plan", dir);
+      results.push({ assignment_id: r.id, outcome: r.outcome, existing: r.existing, code: r.code, message: r.message });
     }
     return results;
   } finally {
@@ -474,8 +433,7 @@ export async function sendPending(planId: string) {
     lockConn.release();
   }
 }
-const setDelivery = (id: string, status: "failed" | "unknown", msg: string) =>
-  query("update plan_assignments set delivery_status = $2, delivery_error = $3 where id = $1 and delivery_status <> 'created'", [id, status, msg.slice(0, 500)]);
+const setDelivery = (id: string, status: "failed" | "unknown", msg: string) => setDeliveryIn("plan_assignments", id, status, msg);
 
 /** Re-reads the plan's created tasks from Task Tracker (the "last read" used for deadline conflict checks). */
 export async function refreshFromTracker(s: Session, id: string) {

@@ -2,19 +2,30 @@
 // Tracker; everyone else sees published plans in the rolling three-month window (the server decides, this page
 // only shows what it is given).
 import { useEffect, useMemo, useState } from "react";
-import { api, useApi, Async, range, BUSINESS_NAMES, useHashQuery, when, Drawer } from "../lib";
+import { api, useApi, Async, range, BUSINESS_NAMES, useHashQuery, when, Drawer, Tabs } from "../lib";
+import { SlackReview } from "./SlackReview";
 
 const STATUS_LABEL: Record<string, string> = { draft: "Draft", published: "Published" };
 const DELIVERY_LABEL: Record<string, string> = { not_sent: "Not sent yet", sending: "Sending…", created: "Created in Task Tracker", failed: "Needs retry", unknown: "No answer: retry to settle" };
 const TASK_LABEL: Record<string, string> = { open: "Open", done: "Done", deleted: "Deleted in Task Tracker" };
 const fmtDate = (d: string | null | undefined) => (d ? new Date(`${d}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "");
 
-export function PlanningPage({ id }: { id?: string }) {
+export function PlanningPage({ id, sub }: { id?: string; sub?: string }) {
   const meta = useApi<any>("/planning/meta");
   if (!meta.data) return <Async s={meta}>{() => null}</Async>;
-  if (id === "new") return <PlanEditor meta={meta.data} />;
-  if (id) return <PlanDetail id={id} meta={meta.data} />;
-  return <PlanList meta={meta.data} />;
+  const tabs = <PlanningTabs owner={meta.data.owner} active={id === "review" ? "review" : "plans"} />;
+  if (id === "review") return <>{tabs}{meta.data.owner ? <SlackReview id={sub} /> : <div className="state">Page not found.</div>}</>;
+  if (id === "new") return <>{tabs}<PlanEditor meta={meta.data} /></>;
+  if (id) return <>{tabs}<PlanDetail id={id} meta={meta.data} /></>;
+  return <>{tabs}<PlanList meta={meta.data} /></>;
+}
+
+/** Plans | Slack Review · N. The review tab and its count exist only for the planning owner (the server hides them from everyone else). */
+function PlanningTabs({ owner, active }: { owner: boolean; active: "plans" | "review" }) {
+  const count = useApi<any>(owner ? "/review/summary" : null);
+  if (!owner) return null;
+  return <Tabs tabs={[["plans", "Plans"], ["review", `Slack Review${count.data ? ` · ${count.data.pending}` : ""}`]]} value={active}
+    onChange={(v) => { location.hash = v === "review" ? "#/planning/review" : "#/planning"; }} />;
 }
 
 // ====================================================================== list and timeline

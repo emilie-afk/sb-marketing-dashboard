@@ -11,6 +11,8 @@ import { registerReviews } from "./routes/reviews";
 import { registerReports, storeAttachment } from "./routes/reports";
 import { registerSettings } from "./routes/settings";
 import { registerPlanning } from "./routes/planning";
+import { registerReview } from "./routes/review";
+import { handleReviewIntake } from "./review";
 import { isPlanningOwner } from "./planning";
 import { clientFromRequest, assertClientMay } from "./automation";
 import { checkSubmission } from "../shared/submission";
@@ -27,6 +29,7 @@ export function createApp() {
   registerReports(r);
   registerSettings(r);
   registerPlanning(r);
+  registerReview(r);
 
   return async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
@@ -37,6 +40,8 @@ export function createApp() {
       if (path === "/auth/logout" && req.method === "POST") return logoutResponse(req);
       if (path === "/submissions" && req.method === "POST") return await submission(req);
       if (path === "/pull-check" && req.method === "POST") return await pullCheck(req);
+      // Slack review scanner: its own secret only (no session, no automation token); submit batches, read its checkpoint.
+      if (path.startsWith("/review-intake/")) return await handleReviewIntake(req, path);
       let m = /^\/submissions\/([A-Za-z0-9_.:-]{3,120})\/attachments$/.exec(path);
       if (m && req.method === "POST") return await submissionAttachment(req, m[1]);
 
