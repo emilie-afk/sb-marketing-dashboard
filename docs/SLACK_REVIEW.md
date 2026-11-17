@@ -32,6 +32,14 @@ history stay in the dashboard tables.
    (review status) and delivery (Task Tracker status) are shown separately. The suggestion stays in Slack Review, with a
    link to the created task.
 5. **Dismiss** keeps the record, so later scans don't bring it back.
+6. **Add to plan** (instead of Create task) copies the reviewed task fields into one of the owner's **draft** plans as
+   an assignment. Draft plans are private to the owner and nothing is sent to Task Tracker while a plan is a draft, so
+   the item stays private and is not a task. It becomes a task only when the owner publishes the plan (publishing
+   sends the plan's assignments). Only draft plans of the suggestion's business are offered; published plans are
+   refused. The fields must be complete (brand, assignee, deadline), as for Create task. The suggestion becomes
+   **In a plan**, links to the plan, and can no longer be edited, created or dismissed here (change it in the plan);
+   later scans never reopen it. If the item is removed from the plan, or the plan is deleted, **Return to review**
+   puts the suggestion back in the review list. Slack text and links are never copied into the plan.
 
 ## Delivery
 
@@ -96,6 +104,8 @@ accepted yet; the scanner then starts from its configured start point.
 
 - Migration `db/migrations/012_slack_review.sql`; rollback `db/rollback/012_slack_review.down.sql` (drops the four
   review tables; any tasks already created in Task Tracker stay there).
+- Migration `db/migrations/013_slack_review_plans.sql` (Add to plan); rollback `db/rollback/013_slack_review_plans.down.sql`
+  returns planned suggestions to "pending" (the plans keep their items).
 - Requires Task Tracker migration `004_task_origin.sql` and the matching deploy (accepts `origin: "review"`) before the
   first task is created.
 - Scanner instructions: [SLACK_REVIEW_SCANNER.md](SLACK_REVIEW_SCANNER.md). The scanner stays unscheduled until the queue

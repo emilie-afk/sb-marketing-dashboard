@@ -285,3 +285,86 @@ describe("review and create", () => {
     expect(tracker.creates).toBe(0);
   });
 });
+
+describe("Add to plan", () => {
+  const planBody = (name: string) => ({ business_id: "sb", name, prep_start: "2026-11-20", campaign_start: "2026-12-01", campaign_end: "2026-12-10" });
+  const fresh = async (title: string) => {
+    await scan("POST", "/review-intake/batches", batch([msg({ title })]));
+    return (await first()).find((i: any) => i.fields.title === title);
+  };
+  const cur = async (id: string) => (await owner("GET", `/review/suggestions/${id}`)).body.suggestion;
+
+  it("puts the approved fields in a draft plan: private to Emilie, not a task until the plan is published", async () => {
+    const draft = (await owner("POST", "/planning/plans", planBody("Synthetic gift-guide push"))).body.plan;
+    const pub = (await owner("POST", "/planning/plans", planBody("Synthetic published plan"))).body.plan;
+    expect((await owner("POST", `/planning/plans/${pub.id}/publish`, { version: pub.version })).status).toBe(200);
+    const s = await fresh("Refresh the gift guide hero");
+    await fill(s.id);
+    const before = (await owner("GET", "/review/summary")).body.pending;
+
+    // Only draft plans of the suggestion's business are offered; a published plan is refused.
+    const choices = (await owner("GET", `/review/suggestions/${s.id}/plans`)).body;
+    expect(choices.plans.map((p: any) => p.id)).toContain(draft.id);
+    expect(choices.plans.map((p: any) => p.id)).not.toContain(pub.id);
+    let v = (await cur(s.id)).version;
+    const refused = await owner("POST", `/review/suggestions/${s.id}/add-to-plan`, { version: v, plan_id: pub.id });
+    expect(refused.status).toBe(409);
+    expect(refused.body.error.code).toBe("plan_published");
+
+    // An incomplete suggestion can't go into a plan.
+    const inc = await fresh("Draft the florist outreach list");
+    expect((await owner("POST", `/review/suggestions/${inc.id}/add-to-plan`, { version: inc.version, plan_id: draft.id })).body.error.code).toBe("incomplete");
+
+    const added = await owner("POST", `/review/suggestions/${s.id}/add-to-plan`, { version: v, plan_id: draft.id });
+    expect(added.status).toBe(200);
+    expect(added.body.suggestion).toMatchObject({ status: "planned", locked: true, plan: { id: draft.id, name: "Synthetic gift-guide push", status: "draft", item: { delivery: "not_sent" } } });
+    expect(tracker.creates).toBe(0);
+    expect((await owner("GET", "/review/summary")).body.pending).toBe(before - 1 + 1);   // one left the queue, the incomplete one joined it
+    expect((await owner("GET", "/review/suggestions?status=planned")).body.items.map((i: any) => i.id)).toContain(s.id);
+
+    // The plan has the item with the approved fields only, and an editor open on the old plan version must reload.
+    const plan = (await owner("GET", `/planning/plans/${draft.id}`)).body.plan;
+    expect(plan.assignments.map((a: any) => a.title)).toContain("Refresh the gift guide hero");
+    expect(JSON.stringify(plan)).not.toMatch(/Synthetic: please|slack\.com/);
+    expect((await owner("PATCH", `/planning/plans/${draft.id}`, { version: draft.version, ...planBody("Stale edit") })).status).toBe(409);
+
+    // Nobody else sees it: not the draft plan, not a task, not the queue.
+    expect((await req("manager@example.test", "GET", `/planning/plans/${draft.id}`)).status).toBe(404);
+    expect(JSON.stringify((await req("manager@example.test", "GET", "/planning/plans")).body)).not.toContain("Refresh the gift guide hero");
+    expect((await req("manager@example.test", "GET", `/review/suggestions/${s.id}`)).status).toBe(404);
+
+    // A planned suggestion is changed in the plan, not here; scans never reopen it.
+    v = (await cur(s.id)).version;
+    expect((await owner("POST", `/review/suggestions/${s.id}/create`, { version: v })).body.error.code).toBe("planned");
+    expect((await owner("POST", `/review/suggestions/${s.id}/dismiss`, { version: v })).body.error.code).toBe("planned");
+    expect((await fill(s.id)).body.error.code).toBe("planned");
+    expect((await owner("POST", `/review/suggestions/${s.id}/add-to-plan`, { version: v, plan_id: draft.id })).body.error.code).toBe("not_pending");
+    const again = await scan("POST", "/review-intake/batches", batch([{ ...msg(), message_ts: s.source_key?.split(":")[2] ?? (await q("select message_ts from review_suggestions where id = $1", [s.id]))[0].message_ts, title: "Overwritten?" }]));
+    expect(again.body.unchanged_count).toBe(1);
+    expect((await cur(s.id))).toMatchObject({ status: "planned", fields: { title: "Refresh the gift guide hero" } });
+
+    // Publishing the plan is what sends it: one task, approved fields only.
+    const p2 = (await owner("GET", `/planning/plans/${draft.id}`)).body.plan;
+    expect((await owner("POST", `/planning/plans/${draft.id}/publish`, { version: p2.version })).status).toBe(200);
+    expect(tracker.creates).toBe(1);
+    expect(tracker.bodies.at(-1)).toMatchObject({ title: "Refresh the gift guide hero", plan_id: draft.id });
+    expect(JSON.stringify(tracker.bodies)).not.toMatch(/Synthetic: please|slack\.com/);
+    expect((await cur(s.id)).plan).toMatchObject({ status: "published", item: { delivery: "created" } });
+  });
+
+  it("removed from its plan, it can return to the review list", async () => {
+    const draft = (await owner("POST", "/planning/plans", planBody("Synthetic plan to delete"))).body.plan;
+    const s = await fresh("Order sample ribbons");
+    await fill(s.id);
+    let c = await cur(s.id);
+    await owner("POST", `/review/suggestions/${s.id}/add-to-plan`, { version: c.version, plan_id: draft.id });
+    c = await cur(s.id);
+    expect((await owner("POST", `/review/suggestions/${s.id}/return`, { version: c.version })).body.error.code).toBe("still_planned");
+    expect((await owner("DELETE", `/planning/plans/${draft.id}`)).status).toBe(200);
+    c = await cur(s.id);
+    expect(c).toMatchObject({ status: "planned", plan: { item: null } });
+    const back = await owner("POST", `/review/suggestions/${s.id}/return`, { version: c.version });
+    expect(back.body.suggestion).toMatchObject({ status: "pending", plan: null, locked: false });
+    expect(tracker.creates).toBe(0);
+  });
+});
