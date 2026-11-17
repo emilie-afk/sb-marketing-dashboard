@@ -105,7 +105,8 @@ accepted yet; the scanner then starts from its configured start point.
 - Migration `db/migrations/012_slack_review.sql`; rollback `db/rollback/012_slack_review.down.sql` (drops the four
   review tables; any tasks already created in Task Tracker stay there).
 - Migration `db/migrations/013_slack_review_plans.sql` (Add to plan); rollback `db/rollback/013_slack_review_plans.down.sql`
-  returns planned suggestions to "pending" (the plans keep their items).
+  (deploy the previous build first). It does not reopen suggestions that are in a plan, because the plan keeps the item
+  and reopening could make the same work a second task: they become "dismissed", tagged `in_plan_before_rollback`.
 - Requires Task Tracker migration `004_task_origin.sql` and the matching deploy (accepts `origin: "review"`) before the
   first task is created.
 - Scanner instructions: [SLACK_REVIEW_SCANNER.md](SLACK_REVIEW_SCANNER.md). The scanner stays unscheduled until the queue
