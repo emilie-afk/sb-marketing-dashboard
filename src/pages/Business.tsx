@@ -243,12 +243,39 @@ function Corporate({ period }: { period: Period }) {
         : signups.error || !signups.data || signups.data.count === null ? "Signup count unavailable"
         : <><strong>{signups.data.count.toLocaleString("en-US")}</strong> all-time</>}</p>
     </Section>
+    <CorporateWorkflow />
     <Async s={s}>{(d) => <>
     {d.source && d.source.status !== "ok" && <Unavailable title="Corporate Gifting connection" reason={d.source.status === "failing" ? `The Corporate Gifting app could not be read: ${d.source.last_error ?? "see Settings"}. Figures below are the last successful data.` : "The Corporate Gifting app is not connected yet."} />}
     <p className="sub">{d.note} Monthly figures from the Corporate Gifting app. Orders and units count Shopify orders only; a month with manually recorded sales shows them as incomplete.</p>
     {d.metrics.length > 0 && <div className="grid g4">{d.metrics.map((m: any) => <MetricTile key={m.key} m={{ ...m, label: m.key === "revenue" ? "Corporate revenue" : m.key === "orders" ? "Corporate orders" : "Corporate units" }} />)}</div>}
     <p>Marketplace outreach, proposals, requirements and follow-ups are edited in the <a href="https://sb-corporate-gifts.netlify.app/" target="_blank" rel="noreferrer">Corporate Gifting app</a>.</p>
     </>}</Async>
+  </>;
+}
+
+const CG_APP = "https://sb-corporate-gifts.netlify.app";
+const SAMPLE_ORDER: [string, string][] = [["requested", "Requested"], ["approved", "Approved"], ["shipped", "Shipped"], ["delivered", "Delivered"], ["cancelled", "Cancelled"]];
+
+/** Sample progress, follow-ups and recent decisions/blockers: current state from the Corporate Gifting app, not tied to the date filter. */
+function CorporateWorkflow() {
+  const w = useApi<any>("/corporate-workflow", []);
+  if (w.loading && !w.data) return <div className="state" role="status">Loading…</div>;
+  if (w.error || !w.data || w.data.ok === false) {
+    return <Section title="Corporate gifting workflow"><p>{w.data?.reason === "not_configured" ? "The Corporate Gifting app is not connected yet." : "Workflow summary unavailable"}</p></Section>;
+  }
+  const d = w.data;
+  return <>
+    <Section title="Sample box progress" sub="Each tracked request once, under its latest confirmed status. Separate from form signups.">
+      {d.sample_progress.tracked === 0 ? <p>No sample requests tracked yet.</p>
+        : <p>{SAMPLE_ORDER.filter(([k]) => d.sample_progress.by_status[k] > 0).map(([k, l]) => `${l} ${d.sample_progress.by_status[k]}`).join(" · ")} <span className="sub">({d.sample_progress.tracked} tracked)</span></p>}
+    </Section>
+    <Section title="Follow-ups" sub="Overdue = open with an agreed due date that has passed.">
+      <p><strong>{d.follow_ups.open}</strong> open · <strong>{d.follow_ups.overdue}</strong> overdue · <a href={`${CG_APP}/?tab=resources&view=followups`} target="_blank" rel="noreferrer">Open in Corporate Gifting</a></p>
+    </Section>
+    {d.recent.length > 0 && <Section title="Recent decisions and blockers" sub="Last 30 days. Details are in the Corporate Gifting app.">
+      <ul>{d.recent.map((r: any, i: number) => <li key={i}><strong>{r.kind === "blocker" ? "Blocker" : "Decision"}:</strong> {r.title}{r.supplier ? ` (${r.supplier})` : ""} <span className="sub">{String(r.at).slice(0, 10)}{r.kind === "blocker" && r.status !== "open" ? " · resolved" : ""}</span></li>)}</ul>
+      <p><a href={`${CG_APP}/?tab=resources&view=followups`} target="_blank" rel="noreferrer">Details in Corporate Gifting</a></p>
+    </Section>}
   </>;
 }
 
