@@ -94,6 +94,19 @@ export function parseDailyAnalytics(sheets: Sheet[], opts: { fromYear?: number; 
   return out;
 }
 
+/** Scorecard ad row name ("google", "facebook", "amazon", "tiktok"…) → the platform key used for campaigns, and a label. */
+const KNOWN_PLATFORMS: Record<string, { key: string; label: string }> = {
+  google: { key: "google", label: "Google Ads" }, facebook: { key: "facebook", label: "Meta (Facebook) Ads" }, meta: { key: "facebook", label: "Meta (Facebook) Ads" },
+  amazon: { key: "amazon", label: "Amazon Ads" }, etsy: { key: "etsy", label: "Etsy Ads" }, tiktok: { key: "tiktok", label: "TikTok Ads" },
+};
+export function adPlatform(name: string): { key: string; label: string } | null {
+  const n = name.trim().toLowerCase();
+  if (KNOWN_PLATFORMS[n]) return KNOWN_PLATFORMS[n];
+  const key = n.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 30);
+  if (key.length < 2 || key === "total") return null;
+  return { key, label: `${name.trim().replace(/\b\w/g, (c) => c.toUpperCase())} Ads` };
+}
+
 /**
  * EOS scorecard → month totals, for months that have ended and have an "All" revenue figure.
  * Revenue (Succulents Box total = All − Little Sunnie − Photostosketches; Website, Amazon, Faire; P2S), the US
@@ -139,11 +152,19 @@ export function parseEosMonths(sheets: Sheet[], opts: { fromYear?: number; today
       add(sb, "add_to_cart_rate", "all", val["conv|added to cart"]);
       add(sb, "checkout_rate", "all", val["conv|reached check out"]);
       add(sb, "conversion_rate", "all", val["conv|converted"]);
-      const g = val["ads|google ads sb"], f = val["ads|facebook ads sb"];
-      add(sb, "ad_spend", "platform:google", g, "Google Ads");
-      add(sb, "ad_spend", "platform:facebook", f, "Meta (Facebook) Ads");
+      // Every "<Platform> Ads SB" row in the Ads section is that platform's month spend (Google, Facebook, Amazon, and any
+      // platform added to the scorecard later). Its scope matches the campaign rows' platform name (platform:<key>).
+      let anyPlatform = false;
+      for (const [k, v] of Object.entries(val)) {
+        const m = /^ads\|(.+?)\s+ads\s+sb$/.exec(k);
+        if (!m) continue;
+        const p = adPlatform(m[1]);
+        if (!p) continue;
+        add(sb, "ad_spend", `platform:${p.key}`, v, p.label);
+        if (v !== null && v !== undefined) anyPlatform = true;
+      }
       // The total row is a formula that shows 0 for an empty month, so it is only used when a platform is filled in.
-      if ((g !== null && g !== undefined) || (f !== null && f !== undefined)) add(sb, "ad_spend", "all", val["ads|total ad spent (succulents box)"], SCOPE_LABELS.sb_all);
+      if (anyPlatform) add(sb, "ad_spend", "all", val["ads|total ad spent (succulents box)"], SCOPE_LABELS.sb_all);
       add(p2s, "revenue", "all", p2sRev, SCOPE_LABELS.p2s_all);
       add(p2s, "ad_spend", "all", val["ads|photostosketches"], "Etsy Ads");
       const month = start.slice(0, 7);

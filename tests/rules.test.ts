@@ -269,4 +269,31 @@ describe("Daily Analytics Report and EOS scorecard layouts", () => {
     const out = parseEosMonths([sheet], { today: "2026-11-13" });
     expect(out.map((b) => b.month)).toEqual(["2026-10"]);       // November's column isn't final until the month ends
   });
+
+  it("reads every '<Platform> Ads SB' row as that platform's month spend, including Amazon and new platforms", async () => {
+    const { parseEosMonths, adPlatform } = await import("../shared/scorecardParse");
+    expect(adPlatform("Amazon")).toEqual({ key: "amazon", label: "Amazon Ads" });
+    expect(adPlatform("Meta")).toEqual({ key: "facebook", label: "Meta (Facebook) Ads" });
+    expect(adPlatform("Pinterest")).toEqual({ key: "pinterest", label: "Pinterest Ads" });
+    const sheet = { name: "2026", rows: [[], [], [null, null, "SEP 1-30", "OCT 1-31"], [null, null, "TOTAL (MONTH)", "TOTAL (MONTH)"],
+      ["Revenue", "All", 100, 80],
+      ["Ads Spent", "Google Ads SB", 10, null], [null, "Facebook Ads SB", 5, null], [null, "Amazon Ads SB", 7.5, 12], [null, "Pinterest Ads SB", null, null],
+      [null, "Total Ad spent (Succulents Box)", 22.5, 12], [null, "Photostosketches", 3, null]] };
+    const out = parseEosMonths([sheet], { today: "2026-11-17" });
+    const ads = (month: string) => Object.fromEntries(out.find((b) => b.business === "sb" && b.month === month)!.observations
+      .filter((o) => o.metric === "ad_spend").map((o) => [o.scope, [o.value, o.scope_label]]));
+    expect(ads("2026-09")).toEqual({ "platform:google": [10, "Google Ads"], "platform:facebook": [5, "Meta (Facebook) Ads"], "platform:amazon": [7.5, "Amazon Ads"], all: [22.5, expect.any(String)] });
+    // A month with Amazon spend only still gets the Succulents Box total; blank platform cells are never sent as zero.
+    expect(ads("2026-10")).toEqual({ "platform:amazon": [12, "Amazon Ads"], all: [12, expect.any(String)] });
+    // The P2S row (Etsy Ads) is unchanged.
+    expect(out.find((b) => b.business === "p2s" && b.month === "2026-09")!.observations.find((o) => o.metric === "ad_spend")!.value).toBe(3);
+  });
+
+  it("an all-blank Ads section sends no ad spend and no total", async () => {
+    const { parseEosMonths } = await import("../shared/scorecardParse");
+    const sheet = { name: "2026", rows: [[], [], [null, null, "OCT 1-31"], [null, null, "TOTAL (MONTH)"], ["Revenue", "All", 100],
+      ["Ads Spent", "Google Ads SB", null], [null, "Amazon Ads SB", null], [null, "Total Ad spent (Succulents Box)", 0]] };
+    const sb = parseEosMonths([sheet], { today: "2026-11-17" }).find((b) => b.business === "sb")!;
+    expect(sb.observations.filter((o) => o.metric === "ad_spend")).toEqual([]);
+  });
 });
