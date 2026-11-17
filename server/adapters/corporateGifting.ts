@@ -112,3 +112,45 @@ export async function corporateSampleSignups(now = Date.now()): Promise<SampleSi
     return { count: null, reason: "unavailable" };
   }
 }
+
+// Corporate gifting workflow summary from the Corporate Gifting app (its Supplier Resources / Slack workflow):
+// sample box progress, open and overdue follow-ups, and recent decisions and blockers as one-line titles. Only these
+// fields are kept (anything else the source sends is dropped); supplier files, quotes, terms, contacts and Slack
+// messages stay in the Corporate Gifting app. Live read with a two-minute cache, like the signup count.
+const sampleStatusCounts = z.object({
+  requested: z.number().int().nonnegative(), approved: z.number().int().nonnegative(), shipped: z.number().int().nonnegative(),
+  delivered: z.number().int().nonnegative(), cancelled: z.number().int().nonnegative(),
+});
+const workflowSchema = z.object({
+  ok: z.literal(true),
+  schema_version: z.literal(1),
+  as_of: z.string().nullable(),
+  today: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  sample_progress: z.object({ tracked: z.number().int().nonnegative(), by_status: sampleStatusCounts }),
+  follow_ups: z.object({ open: z.number().int().nonnegative(), overdue: z.number().int().nonnegative() }),
+  recent: z.array(z.object({
+    kind: z.enum(["decision", "blocker"]),
+    title: z.string().max(120),
+    supplier: z.string().max(120).nullable(),
+    at: z.string(),
+    status: z.enum(["open", "done", "cancelled"]),
+  })).max(8),
+});
+export type CorporateWorkflow = z.infer<typeof workflowSchema> | { ok: false; reason: "not_configured" | "unavailable" };
+let workflowCache: { at: number; value: z.infer<typeof workflowSchema> } | null = null;
+/** Tests only. */
+export function _clearWorkflowCache() { workflowCache = null; }
+
+export async function corporateWorkflow(now = Date.now()): Promise<CorporateWorkflow> {
+  if (!corporateGiftingCredentials()) return { ok: false, reason: "not_configured" };
+  if (workflowCache && now - workflowCache.at < SAMPLE_CACHE_MS) return workflowCache.value;
+  try {
+    const origin = originOf(process.env.CORPORATE_GIFTING_API_URL)!;
+    const headers = { authorization: `Bearer ${process.env.CORPORATE_GIFTING_REPORTING_SECRET}` };
+    const value = workflowSchema.parse(await getJson(origin, "/api/reporting/v1/corporate-workflow", headers, "Corporate Gifting workflow"));
+    workflowCache = { at: now, value };
+    return value;
+  } catch {
+    return { ok: false, reason: "unavailable" };
+  }
+}
