@@ -1,7 +1,5 @@
 # Marketing Dashboard
 
-**Designed and built by Emilie Ngo for Succulents Box.**
-
 An internal workspace for the Succulents Box marketing team. It brings performance reporting, product and vendor analysis, campaign and promotion planning, and team follow-up into one place.
 
 ## Features
@@ -28,3 +26,5 @@ The [Marketing Toolbox](https://github.com/emilie-afk/sb-marketing) is a directo
 ## Tech stack
 
 React, TypeScript, Vite, Netlify Functions, and PostgreSQL.
+
+Designed and built by Emilie Ngo for Succulents Box.
