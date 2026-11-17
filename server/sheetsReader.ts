@@ -22,7 +22,9 @@ const MAX_BYTES = 20 * 1024 * 1024;
 const MAX_CELLS = 2_000_000;
 const XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
-export type SheetReader = (fileId: string, kind: "google_sheet" | "xlsx") => Promise<Sheet[]>;
+/** Which tabs to read, and how many rows of each (large report workbooks keep their figures at the top). */
+export type ReadOptions = { tabs?: (name: string) => boolean; maxRows?: number };
+export type SheetReader = (fileId: string, kind: "google_sheet" | "xlsx", opts?: ReadOptions) => Promise<Sheet[]>;
 
 const APPS_SCRIPT_URL = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]{20,120}\/exec$/;
 
@@ -55,7 +57,7 @@ async function accessToken(): Promise<string> {
 }
 
 // Default reader used by the sync: Apps Script when configured, otherwise the Drive API.
-export const sheetReader: SheetReader = (fileId, kind) => (appsScriptConfigured() ? appsScriptReader(fileId, kind) : driveReader(fileId, kind));
+export const sheetReader: SheetReader = (fileId, kind, opts) => (appsScriptConfigured() ? appsScriptReader(fileId, kind, opts) : driveReader(fileId, kind, opts));
 
 const SCRIPT_ERRORS: Record<string, [string, string]> = {
   bad_key: ["reader_refused", "The spreadsheet reader refused the request. Check that SHEET_READER_KEY matches the script's key."],
@@ -75,7 +77,7 @@ export const READER_LIMITS = {
 const RESULT_HOST = "script.googleusercontent.com";
 const MISDEPLOYED = "The spreadsheet reader did not answer as expected. Check that the script is deployed as a web app that runs as its owner and that anyone can call.";
 
-export const appsScriptReader: SheetReader = async (fileId, kind) => {
+export const appsScriptReader: SheetReader = async (fileId, kind, opts) => {
   if (!appsScriptConfigured()) throw new HttpError(503, "not_configured", "Spreadsheet reading is not configured (missing reader address or key).");
   if (!/^[A-Za-z0-9_-]{20,80}$/.test(fileId)) throw new HttpError(400, "invalid_file_id", "Invalid file id.");
   const ctrl = new AbortController();
@@ -91,7 +93,7 @@ export const appsScriptReader: SheetReader = async (fileId, kind) => {
     if (typeof j.data !== "string" || !j.data) throw new HttpError(502, "read_failed", "The spreadsheet reader returned no file.");
     const buf = Buffer.from(j.data, "base64");
     if (buf.length > MAX_BYTES) throw new HttpError(413, "too_large", "The spreadsheet is larger than 20 MB.");
-    return await workbookToSheets(buf);
+    return await workbookToSheets(buf, opts);
   } catch (e) {
     if (ctrl.signal.aborted) throw new HttpError(504, "read_timeout", `The spreadsheet reader did not finish within ${Math.round(READER_LIMITS.timeoutMs / 1000)} seconds.`);
     throw e;
@@ -161,7 +163,7 @@ async function readLimited(res: Response, limit: number, signal: AbortSignal): P
   return Buffer.concat(chunks).toString("utf8");
 }
 
-export const driveReader: SheetReader = async (fileId, kind) => {
+export const driveReader: SheetReader = async (fileId, kind, opts) => {
   if (!driveConfigured()) throw new HttpError(503, "not_configured", "Spreadsheet reading is not configured (missing Google sync credential).");
   if (!/^[A-Za-z0-9_-]{20,80}$/.test(fileId)) throw new HttpError(400, "invalid_file_id", "Invalid file id.");
   const token = await accessToken();
@@ -173,20 +175,22 @@ export const driveReader: SheetReader = async (fileId, kind) => {
   if (!r.ok) throw new HttpError(502, "read_failed", `Google returned ${r.status} for the spreadsheet.`);
   const buf = Buffer.from(await r.arrayBuffer());
   if (buf.length > MAX_BYTES) throw new HttpError(413, "too_large", "The spreadsheet is larger than 20 MB.");
-  return workbookToSheets(buf);
+  return workbookToSheets(buf, opts);
 };
 
-export async function workbookToSheets(buf: Buffer | ArrayBuffer): Promise<Sheet[]> {
+export async function workbookToSheets(buf: Buffer | ArrayBuffer, opts: ReadOptions = {}): Promise<Sheet[]> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buf as any);
   const out: Sheet[] = [];
   let total = 0;
   wb.eachSheet((ws) => {
+    if (opts.tabs && !opts.tabs(ws.name)) return;
     const rows: Cell[][] = [];
     // ExcelJS recomputes columnCount by scanning every row on each access, so read it once per tab. (Reading it
     // per cell made real calendars with ~1,000 formatted rows per tab take longer than the background limit.)
     const width = ws.columnCount;
     ws.eachRow({ includeEmpty: true }, (row, n) => {
+      if (opts.maxRows && n > opts.maxRows) return;
       const cells: Cell[] = [];
       const last = Math.max(row.cellCount, width);
       total += last;

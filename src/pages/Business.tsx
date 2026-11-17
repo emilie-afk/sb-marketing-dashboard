@@ -235,10 +235,13 @@ export function PromotionDrawer({ id, role, onClose }: { id: string; role: strin
 
 function Corporate({ period }: { period: Period }) {
   const s = usePeriodData("/business/sb/corporate", period);
+  // All-time, so it ignores the date filter (no period in the request or dependencies).
   const signups = useApi<{ count: number | null }>("/sample-signups", []);
   return <>
     <Section title="Sample box signups">
-      <Async s={signups}>{(report) => <p>{report.count === null ? "Signup count unavailable." : <><strong>{report.count.toLocaleString()}</strong> all-time</>}</p>}</Async>
+      <p aria-live="polite">{signups.loading && !signups.data ? "Loading…"
+        : signups.error || !signups.data || signups.data.count === null ? "Signup count unavailable"
+        : <><strong>{signups.data.count.toLocaleString("en-US")}</strong> all-time</>}</p>
     </Section>
     <Async s={s}>{(d) => <>
     {d.source && d.source.status !== "ok" && <Unavailable title="Corporate Gifting connection" reason={d.source.status === "failing" ? `The Corporate Gifting app could not be read: ${d.source.last_error ?? "see Settings"}. Figures below are the last successful data.` : "The Corporate Gifting app is not connected yet."} />}

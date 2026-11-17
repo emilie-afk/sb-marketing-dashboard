@@ -69,3 +69,21 @@ export function Drawer({ onClose, children }: { onClose: () => void; children: R
 export function Unavailable({ title, reason }: { title: string; reason: string }) {
   return <div className="state unavailable"><b>{title}: unavailable.</b> {reason}</div>;
 }
+
+// ------------------------------------------------------------ page state in the URL (#/page?key=value)
+/** Query parameters of the current hash route, so a view can be bookmarked, shared and restored with Back. */
+export function useHashQuery(): [URLSearchParams, (next: Record<string, string | null | undefined>, opts?: { push?: boolean; reset?: boolean }) => void] {
+  const read = () => new URLSearchParams(location.hash.split("?")[1] ?? "");
+  const [q, setQ] = useState(read);
+  useEffect(() => { const f = () => setQ(read()); addEventListener("hashchange", f); return () => removeEventListener("hashchange", f); }, []);
+  const update = (next: Record<string, string | null | undefined>, opts: { push?: boolean; reset?: boolean } = {}) => {
+    const p = opts.reset ? new URLSearchParams() : read();
+    for (const [k, v] of Object.entries(next)) { if (v === null || v === undefined || v === "") p.delete(k); else p.set(k, v); }
+    const path = location.hash.split("?")[0] || "#/";
+    const url = `${path}${p.toString() ? `?${p}` : ""}`;
+    if (url === location.hash) return;
+    if (opts.push) location.hash = url;
+    else { history.replaceState(history.state, "", url); dispatchEvent(new HashChangeEvent("hashchange")); }
+  };
+  return [q, update];
+}

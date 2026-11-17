@@ -6,6 +6,7 @@ import { badRequest, notFound } from "../http";
 import { atLeast } from "../auth";
 import { occurrence, tbcText, monthName, type GiftRule } from "../../shared/giftCalendar";
 import { formatRange } from "../../shared/dates";
+import { plansByOccasion, isPlanningOwner } from "../planning";
 
 type Occ = { id: string; name: string; kind: "dated" | "year_round"; category: string | null; rule: GiftRule | null; month_label: string; timing_text: string;
   themes: string | null; lead_in: string | null; lead_in_month: number | null; seasonal: boolean; parent_id: string | null; brands: string[] };
@@ -62,7 +63,75 @@ export async function checkGiftLink(occasionId: string | null | undefined, year:
   return { id: o.id, year: null };
 }
 
+/** Promotions linked to gift occasions (occasion or its children) for given occurrence years, by "<parent>:<year>". */
+async function linkedByOccurrence(parentOf: Map<string, string>, years: number[], business: string | null) {
+  const rows = await query<any>(
+    `select p.id, p.title, p.business_id business, p.execution_status status, p.gift_occasion_id occ, p.gift_occasion_year y,
+            to_char(p.start_date,'YYYY-MM-DD') start_date, to_char(p.end_date,'YYYY-MM-DD') end_date
+       from promotions p where p.gift_occasion_id is not null and p.gift_occasion_year = any($1::int[]) and ($2::text is null or p.business_id = $2)
+      order by p.start_date nulls last`, [years, business]);
+  const out = new Map<string, any[]>();
+  for (const r of rows) { const k = `${parentOf.get(r.occ) ?? r.occ}:${r.y}`; out.set(k, [...(out.get(k) ?? []), r]); }
+  return out;
+}
+
+/** Upcoming occasions agenda: gift occasions and spreadsheet occasions in date order, each with its linked promotions. */
+export async function occasionAgenda(from: string, to: string, business: string | null, type: "all" | "gift" | "sheet", seasonal: boolean) {
+  const rows: any[] = [];
+  if (type !== "sheet") {
+    const all = await query<Occ>(OCC_SQL);
+    const parentOf = new Map(all.map((o) => [o.id, o.parent_id ?? o.id]));
+    const byId = new Map(all.map((o) => [o.id, o]));
+    const g = await giftCalendarItems(from, to, business, seasonal);   // includes windows already in progress that overlap the range
+    const linked = await linkedByOccurrence(parentOf, yearsOf(from, to), business);
+    for (const it of g.items) {
+      const o = byId.get(it.occasionId)!;
+      rows.push({ kind: "gift", key: it.id, occasionId: it.occasionId, year: it.year, title: it.title, start: it.start, end: it.end, brands: it.brands,
+        seasonal: it.seasonal, monthLabel: o.month_label, leadIn: o.lead_in, inProgress: it.start < from, themes: o.themes, promotions: linked.get(`${it.occasionId}:${it.year}`) ?? [] });
+    }
+    for (const u of g.undated) {
+      const m = Number(byId.get(u.occasionId)?.rule && (byId.get(u.occasionId)!.rule as any).m) || 1;
+      rows.push({ kind: "gift", key: `${u.occasionId}:${u.year}`, occasionId: u.occasionId, year: u.year, title: u.title, start: `${u.year}-${String(m).padStart(2, "0")}-01`, end: null,
+        tbc: true, brands: u.brands, seasonal: false, monthLabel: byId.get(u.occasionId)?.month_label, leadIn: byId.get(u.occasionId)?.lead_in ?? null, promotions: linked.get(`${u.occasionId}:${u.year}`) ?? [] });
+    }
+  }
+  if (type !== "gift") {
+    const occ = await query<any>(
+      `select o.id, o.business_id, o.name, to_char(o.occasion_date,'YYYY-MM-DD') d, o.occasion_type, o.note, o.selected_promotion_id,
+              p.title promo_title, p.execution_status promo_status, to_char(p.start_date,'YYYY-MM-DD') promo_start, to_char(p.end_date,'YYYY-MM-DD') promo_end
+         from occasions o left join promotions p on p.id = o.selected_promotion_id
+        where o.occasion_date between $1 and $2 and ($3::text is null or o.business_id = $3) order by o.occasion_date, o.name`, [from, to, business]);
+    // The same spreadsheet occasion for several businesses shows once, listing each business.
+    const merged = new Map<string, any>();
+    for (const o of occ) {
+      const k = `${o.d}|${o.name.trim().toLowerCase()}`;
+      const cur = merged.get(k) ?? { kind: "sheet", key: `sheet:${k}`, ids: [], title: o.name, start: o.d, end: o.d, brands: [], occasionType: o.occasion_type, note: o.note, promotions: [] };
+      cur.ids.push({ id: o.id, business: o.business_id, selected: !!o.selected_promotion_id });
+      if (!cur.brands.includes(o.business_id)) cur.brands.push(o.business_id);
+      if (o.selected_promotion_id) cur.promotions.push({ id: o.selected_promotion_id, title: o.promo_title, business: o.business_id, status: o.promo_status, start_date: o.promo_start, end_date: o.promo_end });
+      merged.set(k, cur);
+    }
+    rows.push(...merged.values());
+  }
+  rows.sort((a, b) => a.start.localeCompare(b.start) || Number(!!a.seasonal) - Number(!!b.seasonal) || a.title.localeCompare(b.title));
+  return rows;
+}
+
 export function registerGifts(r: Router) {
+  r.get("/occasions/agenda", async ({ url, session }) => {
+    const from = url.searchParams.get("from") ?? "", to = url.searchParams.get("to") ?? "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) throw badRequest("from and to must be dates, with to on or after from");
+    if (Date.parse(to) - Date.parse(from) > 400 * 864e5) throw badRequest("Choose a range of at most 400 days");
+    const type = url.searchParams.get("type");
+    const items = await occasionAgenda(from, to, url.searchParams.get("business") || null, type === "gift" || type === "sheet" ? type : "all", url.searchParams.get("seasonal") !== "0");
+    // Plan badges: only plans this person may see (server-side rule), so counts never reveal hidden plans.
+    const plans = await plansByOccasion(session, [...new Set(items.filter((i) => i.kind === "gift").map((i) => i.year as number))],
+      items.filter((i) => i.kind === "sheet").flatMap((i) => i.ids.map((x: any) => x.id)));
+    for (const it of items) it.plans = it.kind === "gift" ? plans.get(`gift:${it.occasionId}:${it.year}`) ?? [] : it.ids.flatMap((x: any) => plans.get(`sheet:${x.id}`) ?? []);
+    return { from, to, items, planningOwner: isPlanningOwner(session),
+      note: "Gift occasions are all-day U.S. dates. Campaign lead-ins are suggested start dates, separate from the occasion dates." };
+  });
+
   // Picker list (dated and year-round), with each dated occasion's dates for the years asked for.
   r.get("/gift-occasions", async ({ url }) => {
     const y = Number(url.searchParams.get("year")) || new Date().getUTCFullYear();
@@ -118,6 +187,8 @@ export function registerGifts(r: Router) {
       year, dates: x && !x.tbc ? { start: x.start, end: x.end } : null, datesText: year ? datesText(o, year, ovs.get(`${o.id}:${year}`)) : "Year-round",
       within: children.map((c) => ({ id: c.id, name: c.name, timing: c.timing_text, themes: c.themes, datesText: year ? datesText(c, year) : null })),
       promotions: promos, canCreate: atLeast(session, "editor"),
+      plans: year ? ((await plansByOccasion(session, [year], [])).get(`gift:${o.id}:${year}`) ?? []).filter((p) => !business || p.business === business) : [],
+      canPlan: isPlanningOwner(session),
     };
   });
 }

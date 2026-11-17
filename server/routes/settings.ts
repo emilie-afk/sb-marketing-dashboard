@@ -38,11 +38,13 @@ export function registerSettings(r: Router) {
   r.post("/settings/sheet-sources", async ({ req, session }) => {
     const b = z.object({
       business_id: z.enum(["sb", "p2s", "perksradar"]), year: z.number().int().min(2020).max(2100).nullable(),
-      role: z.enum(["annual_calendar", "seasonal_program", "intake"]), label: z.string().trim().min(2).max(120),
+      role: z.enum(["annual_calendar", "seasonal_program", "intake", "daily_analytics", "eos_scorecard"]), label: z.string().trim().min(2).max(120),
       file: z.string().min(10).max(500), file_kind: z.enum(["google_sheet", "xlsx"]), sync_interval_minutes: z.number().int().min(15).max(10080).default(360),
     }).safeParse(await readJson(req));
     if (!b.success) throw badRequest("Check the spreadsheet details.");
-    if (b.data.role !== "intake" && !b.data.year) throw badRequest("Calendar spreadsheets need a year.");
+    const calendar = b.data.role === "annual_calendar" || b.data.role === "seasonal_program";
+    if (calendar && !b.data.year) throw badRequest("Calendar spreadsheets need a year.");
+    if (!calendar) b.data.year = null;
     const id = fileIdFrom(b.data.file);
     if (!id) throw badRequest("That does not look like a Google Drive or Sheets link.");
     const row = await one<{ id: string }>(
