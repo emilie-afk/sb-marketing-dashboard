@@ -23,6 +23,8 @@ export function PlanningPage({ id, sub }: { id?: string; sub?: string }) {
 /** Plans | Slack Review · N. The review tab and its count exist only for the planning owner (the server hides them from everyone else). */
 function PlanningTabs({ owner, active }: { owner: boolean; active: "plans" | "review" }) {
   const count = useApi<any>(owner ? "/review/summary" : null);
+  // Slack Review actions announce a change so the count stays right without a page reload.
+  useEffect(() => { const f = () => count.reload(); window.addEventListener("slack-review-changed", f); return () => window.removeEventListener("slack-review-changed", f); }, [count.reload]);
   if (!owner) return null;
   return <Tabs tabs={[["plans", "Plans"], ["review", `Slack Review${count.data ? ` · ${count.data.pending}` : ""}`]]} value={active}
     onChange={(v) => { location.hash = v === "review" ? "#/planning/review" : "#/planning"; }} />;

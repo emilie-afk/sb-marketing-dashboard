@@ -4,7 +4,7 @@ import { useState } from "react";
 import { api, useApi, Async, BUSINESS_NAMES, Drawer, when, useHashQuery } from "../lib";
 
 const fmtDate = (d: string | null | undefined) => (d ? new Date(`${d}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "");
-const STATUS: Record<string, string> = { pending: "To review", approved: "Approved", dismissed: "Dismissed" };
+const STATUS: Record<string, string> = { pending: "To review", planned: "In a plan", approved: "Approved", dismissed: "Dismissed" };
 const DELIVERY: Record<string, string> = { not_sent: "Not sent", sending: "Sending…", created: "Created in Task Tracker", failed: "Needs retry", unknown: "No answer: retry to settle" };
 const TASK: Record<string, string> = { open: "Open", done: "Done", deleted: "Deleted in Task Tracker" };
 
@@ -21,10 +21,10 @@ function Queue() {
     <div className="toolbar">
       <b>Slack Review</b>
       <label>Show <select value={status} onChange={(e) => setQ({ status: e.target.value === "pending" ? null : e.target.value })}>
-        <option value="pending">To review</option><option value="approved">Approved</option><option value="dismissed">Dismissed</option><option value="all">All</option></select></label>
+        <option value="pending">To review</option><option value="planned">In a plan</option><option value="approved">Approved</option><option value="dismissed">Dismissed</option><option value="all">All</option></select></label>
       <input type="search" placeholder="Search suggestions" defaultValue={search} aria-label="Search suggestions" onKeyDown={(e) => { if (e.key === "Enter") setQ({ q: (e.target as HTMLInputElement).value || null }); }} />
     </div>
-    <p className="sub">Private to you. Suggestions found in Slack wait here until you create a task or dismiss them. Only the task fields you approve are sent to Task Tracker; Slack text and links stay here.</p>
+    <p className="sub">Private to you. Suggestions found in Slack wait here until you create a task, add them to a draft plan, or dismiss them. Only the task fields you approve are sent to Task Tracker; Slack text and links stay here.</p>
     <Async s={s}>{(d) => !d.items.length ? <div className="state">{status === "pending" ? "Nothing to review." : "No suggestions here."}</div> :
       <div className="table-wrap"><table><thead><tr><th>Suggested task</th><th>Posted</th><th>Business</th><th>Assignee</th><th>Deadline</th><th>Review</th><th>Task Tracker</th></tr></thead>
         <tbody>{d.items.map((it: any) => <tr key={it.id} className="clickable" onClick={() => { location.hash = `#/planning/review/${it.id}`; }}>
@@ -34,7 +34,7 @@ function Queue() {
           <td>{it.fields.assignee?.name ?? <span className="sub">Not set</span>}</td>
           <td>{it.fields.due_date ? fmtDate(it.fields.due_date) : it.source.deadline_text ? <span className="sub">“{it.source.deadline_text}”</span> : <span className="sub">Not set</span>}</td>
           <td><span className={`chip ${it.status === "pending" ? "warn" : it.status === "dismissed" ? "muted" : ""}`}>{STATUS[it.status]}</span></td>
-          <td>{it.status === "approved" ? <span className={`chip ${["failed", "unknown"].includes(it.delivery.status) ? "bad" : ""}`}>{DELIVERY[it.delivery.status]}</span> : <span className="sub">—</span>}</td>
+          <td>{it.status === "planned" ? <span className="sub">{it.plan?.name ? `Plan: ${it.plan.name}` : "Removed from its plan"}</span> : it.status === "approved" ? <span className={`chip ${["failed", "unknown"].includes(it.delivery.status) ? "bad" : ""}`}>{DELIVERY[it.delivery.status]}</span> : <span className="sub">—</span>}</td>
         </tr>)}</tbody></table></div>}</Async>
   </div>;
 }
@@ -44,12 +44,13 @@ function SuggestionDetail({ id }: { id: string }) {
   const dir = useApi<any>("/planning/directory");
   const [edit, setEdit] = useState<any | null>(null);
   const [preview, setPreview] = useState<any | null>(null);
+  const [planPick, setPlanPick] = useState<any | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   if (s.error?.status === 404) return <div className="state">Page not found.</div>;
   return <Async s={s}>{(d) => {
     const it = d.suggestion, f = it.fields;
-    const run = async (fn: () => Promise<any>, done?: string) => { setBusy(true); setMsg(null); try { await fn(); if (done) setMsg(done); s.reload(); } catch (e: any) { setMsg(e.message); } finally { setBusy(false); } };
+    const run = async (fn: () => Promise<any>, done?: string) => { setBusy(true); setMsg(null); try { await fn(); if (done) setMsg(done); s.reload(); window.dispatchEvent(new Event("slack-review-changed")); } catch (e: any) { setMsg(e.message); } finally { setBusy(false); } };
     const brands = (dir.data?.brands ?? []).filter((b: any) => !edit?.business_id || b.business_id === edit.business_id);
     const people = (dir.data?.people ?? []).filter((p: any) => edit?.tracker_brand_id && p.brand_ids.includes(edit.tracker_brand_id));
     return <div>
@@ -94,17 +95,38 @@ function SuggestionDetail({ id }: { id: string }) {
           <div className="row" style={{ gridColumn: "1 / -1" }}><button className="btn primary" disabled={busy}>Save</button><button type="button" className="btn" onClick={() => setEdit(null)}>Cancel</button></div>
         </form>}
 
+        {it.plan && <div className="notice">{it.plan.item
+          ? <>In the {it.plan.status === "published" ? "published" : "draft"} plan <a href={`#/planning/${it.plan.id}`}><b>{it.plan.name}</b></a>{it.plan.status === "published"
+              ? <> — sent with the plan{it.plan.item.delivery === "created" ? " (task created)" : ""}.</>
+              : <> — private to you, not a task until you publish the plan. Change it in the plan.</>}</>
+          : <>Removed from its plan. You can bring it back to the review list.</>}</div>}
         {it.task && <p>Task Tracker: <span className="chip">{TASK[it.task.status] ?? it.task.status}</span> {it.task.as_of && <span className="sub">as of {when(it.task.as_of)}</span>} {it.task.open_url && <a href={it.task.open_url} target="_blank" rel="noopener noreferrer">Open the task</a>}</p>}
         {it.delivery.error && it.status === "approved" && <div className="notice">{it.delivery.error}</div>}
         <div className="row" style={{ marginTop: 10 }}>
           {!it.locked && it.status !== "dismissed" && !edit && <button className="btn small" onClick={() => setEdit({ title: f.title, brief: f.brief ?? "", business_id: f.business_id ?? it.suggested.business ?? "", tracker_brand_id: f.brand?.id ?? "", tracker_assignee_id: f.assignee?.id ?? "", due_date: f.due_date ?? "" })}>Review and edit</button>}
-          {it.status !== "dismissed" && it.delivery.status !== "created" && <button className="btn small primary" disabled={busy} onClick={() => run(async () => setPreview(await api(`/review/suggestions/${id}/preview`, { method: "POST" })))}>
+          {it.status === "pending" && !edit && <button className="btn small" disabled={busy} onClick={() => run(async () => setPlanPick({ ...(await api<any>(`/review/suggestions/${id}/plans`)), plan_id: "" }))}>Add to plan</button>}
+          {it.status === "planned" && !it.plan?.item && <button className="btn small" disabled={busy} onClick={() => run(() => api(`/review/suggestions/${id}/return`, { method: "POST", json: { version: it.version } }), "Back in the review list.")}>Return to review</button>}
+          {!["dismissed", "planned"].includes(it.status) && it.delivery.status !== "created" && <button className="btn small primary" disabled={busy} onClick={() => run(async () => setPreview(await api(`/review/suggestions/${id}/preview`, { method: "POST" })))}>
             {["failed", "unknown", "sending"].includes(it.delivery.status) ? "Retry creating the task" : "Create task"}</button>}
           {!it.locked && it.status !== "dismissed" && <button className="btn small" disabled={busy} onClick={() => { if (confirm("Dismiss this suggestion? It won't come back in later scans.")) run(() => api(`/review/suggestions/${id}/dismiss`, { method: "POST", json: { version: it.version } }), "Dismissed."); }}>Dismiss</button>}
           {(it.delivery.status === "created" || it.delivery.status === "unknown") && <button className="btn small" disabled={busy} onClick={() => run(() => api(`/review/suggestions/${id}/refresh`, { method: "POST" }), "Checked Task Tracker.")}>Check Task Tracker</button>}
         </div>
         {msg && <div className="notice">{msg}</div>}
       </div>
+      {planPick && <Drawer onClose={() => setPlanPick(null)}>
+        <h2>Add to plan</h2>
+        <p className="sub">The task fields below become an item in one of your draft plans. Draft plans are private to you, and nothing is sent to Task Tracker until you publish the plan. The Slack text and links stay here.</p>
+        <dl className="kv"><dt>Title</dt><dd><b>{f.title}</b></dd><dt>Business</dt><dd>{f.business ?? "—"}</dd><dt>Assignee</dt><dd>{f.assignee ? `${f.assignee.name} (${f.brand?.name})` : "—"}</dd>
+          <dt>Due date</dt><dd>{fmtDate(f.due_date) || "—"}</dd><dt>Brief</dt><dd style={{ whiteSpace: "pre-wrap" }}>{f.brief || "—"}</dd></dl>
+        {it.needs.length > 0 ? <div className="notice">Before adding it to a plan: {it.needs.join("; ")}. Use Review and edit first.</div>
+          : !planPick.plans.length ? <div className="notice">No draft {f.business} plans yet. <a href="#/planning/new">Create a plan</a>, then come back.</div>
+          : <label className="stack-form" style={{ display: "block" }}><span>Draft plan</span><select aria-label="Draft plan" value={planPick.plan_id} onChange={(e) => setPlanPick({ ...planPick, plan_id: e.target.value })}>
+              <option value="">Choose a draft plan</option>{planPick.plans.map((p: any) => <option key={p.id} value={p.id}>{p.name} ({fmtDate(p.campaign_start)} – {fmtDate(p.campaign_end)})</option>)}</select></label>}
+        <div className="row" style={{ marginTop: 10 }}><button className="btn primary" disabled={busy || it.needs.length > 0 || !planPick.plan_id} onClick={() => run(async () => {
+          await api(`/review/suggestions/${id}/add-to-plan`, { method: "POST", json: { version: it.version, plan_id: planPick.plan_id } });
+          setPlanPick(null);
+        }, "Added to the plan. It stays private until you publish the plan.")}>Add to plan</button><button className="btn" onClick={() => setPlanPick(null)}>Cancel</button></div>
+      </Drawer>}
       {preview && <Drawer onClose={() => setPreview(null)}>
         <h2>Create task</h2>
         <p className="sub">This exact task is created in Task Tracker. Nothing from Slack is sent. Creating it again never makes a second task.</p>

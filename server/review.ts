@@ -146,8 +146,10 @@ const COLS = `s.id, s.source_key, s.channel_id, s.message_ts, s.thread_ts, s.pos
   s.status, s.reviewed_at, s.edited, s.version, s.delivery_status, s.delivery_error, s.last_attempt_at, s.highest_sent_at, s.fenced_through,
   s.tracker_task_id, s.tracker_version, s.tracker_title, to_char(s.tracker_due_date,'YYYY-MM-DD') tracker_due_date, s.tracker_status, s.tracker_assignee_name_now,
   s.tracker_updated_at, s.created_at, s.updated_at,
+  s.plan_id, s.plan_assignment_id, s.planned_at, mp.name plan_name, mp.status plan_status, pa.delivery_status plan_assignment_delivery,
   r.status sync_status, to_char(r.due_date,'YYYY-MM-DD') sync_due_date, r.title sync_title, r.assignee_name sync_assignee_name, r.source_updated_at sync_updated_at, r.removed_at sync_removed_at`;
-const FROM = `review_suggestions s left join tracker_task_records r on r.record_id = 'task:' || s.tracker_task_id::text and r.kind = 'task'`;
+const FROM = `review_suggestions s left join tracker_task_records r on r.record_id = 'task:' || s.tracker_task_id::text and r.kind = 'task'
+  left join marketing_plans mp on mp.id = s.plan_id left join plan_assignments pa on pa.id = s.plan_assignment_id`;
 
 function taskOf(s: any) {
   if (s.delivery_status !== "created") return null;
@@ -181,7 +183,10 @@ function dto(s: any, followups: any[] = []) {
     needs: needs(s),
     delivery: { status: s.delivery_status, error: s.delivery_error, last_attempt_at: s.last_attempt_at },
     task: taskOf(s),
-    locked: ["sending", "created", "unknown"].includes(s.delivery_status),
+    plan: s.status === "planned" ? { id: s.plan_id, name: s.plan_name ?? null, status: s.plan_status ?? null, planned_at: s.planned_at,
+      // The plan's own item: removed if it was deleted from the plan (or the plan was deleted); otherwise its send state.
+      item: s.plan_assignment_id ? { delivery: s.plan_assignment_delivery } : null } : null,
+    locked: ["sending", "created", "unknown"].includes(s.delivery_status) || s.status === "planned",
   };
 }
 
@@ -246,6 +251,7 @@ export async function editSuggestion(s: Session, id: string, v: z.infer<typeof e
     if (!cur) throw notFound("Suggestion");
     if (cur.version !== v.version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload, then re-apply your edit.");
     if (cur.status === "dismissed") throw new HttpError(409, "dismissed", "This suggestion was dismissed.");
+    if (cur.status === "planned") throw new HttpError(409, "planned", PLANNED_MSG);
     if (["sending", "created", "unknown"].includes(cur.delivery_status)) throw new HttpError(409, "delivery_locked", "A Task Tracker task exists or may exist for this suggestion; change it in Task Tracker (or use Check Task Tracker first).");
     await c.query(`update review_suggestions set title = $2, brief = $3, business_id = $4, tracker_brand_id = $5, tracker_brand_name = $6, tracker_assignee_id = $7,
                      tracker_assignee_name = $8, due_date = $9, edited = true, updated_at = now(), version = version + 1 where id = $1`,
@@ -283,6 +289,7 @@ export async function createFromSuggestion(s: Session, id: string, version: numb
       if (cur.delivery_status === "created") return null;                       // already created: nothing to send
       if (cur.version !== version && !["sending", "unknown"].includes(cur.delivery_status)) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload before creating the task.");
       if (cur.status === "dismissed") throw new HttpError(409, "dismissed", "This suggestion was dismissed.");
+      if (cur.status === "planned") throw new HttpError(409, "planned", PLANNED_MSG);
       const missing = needs(cur);
       if (missing.length) throw new HttpError(422, "incomplete", `Before creating the task: ${missing.join("; ")}.`);
       // Recorded before Task Tracker is called; from here the suggestion cannot be edited or dismissed.
@@ -314,8 +321,75 @@ export async function dismissSuggestion(s: Session, id: string, version: number)
     if (!cur) throw notFound("Suggestion");
     if (cur.version !== version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload first.");
     if (!["not_sent", "failed"].includes(cur.delivery_status)) throw new HttpError(409, "delivery_locked", "A Task Tracker task exists or may exist for this suggestion, so it can't be dismissed.");
+    if (cur.status === "planned") throw new HttpError(409, "planned", PLANNED_MSG);
     // Kept (not deleted), so later scans recognise it and never bring it back.
     await c.query("update review_suggestions set status = 'dismissed', reviewed_at = now(), updated_at = now(), version = version + 1 where id = $1", [id]);
+  });
+  return getSuggestion(s, id);
+}
+
+const PLANNED_MSG = "This suggestion is in a marketing plan. Change or remove it in the plan.";
+
+export const addToPlanSchema = z.object({ version: z.number().int().min(1), plan_id: z.string().uuid() }).strict();
+
+/** Draft plans a suggestion can go into: the owner's draft plans for the suggestion's business. */
+export async function planChoices(s: Session, id: string) {
+  assertReviewer(s);
+  const r = await row(id);
+  if (!r) throw notFound("Suggestion");
+  if (!r.business_id) return { business: null, plans: [] };
+  const plans = await query<any>(`select id, name, to_char(prep_start,'YYYY-MM-DD') prep_start, to_char(campaign_start,'YYYY-MM-DD') campaign_start, to_char(campaign_end,'YYYY-MM-DD') campaign_end
+                                    from marketing_plans where status = 'draft' and business_id = $1 order by campaign_start, name limit 200`, [r.business_id]);
+  return { business: r.business_id, plans };
+}
+
+/**
+ * Add to plan: the approved fields become an assignment in one of the owner's DRAFT plans. Nothing is sent to Task
+ * Tracker (the plan sends it only when it is published), and the item stays private while the plan is a draft. The
+ * Slack excerpt, links and notes are not copied. Later scans never reopen it.
+ */
+export async function addToPlan(s: Session, id: string, v: z.infer<typeof addToPlanSchema>) {
+  assertReviewer(s);
+  const dir = await dirOrNull();
+  await tx(async (c) => {
+    const cur = await row(id, c, true);
+    if (!cur) throw notFound("Suggestion");
+    if (cur.version !== v.version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload first.");
+    if (cur.status !== "pending" || cur.delivery_status !== "not_sent") throw new HttpError(409, "not_pending", "Only a suggestion still to review can be added to a plan.");
+    const missing = needs(cur);
+    if (missing.length) throw new HttpError(422, "incomplete", `Before adding it to a plan: ${missing.join("; ")}.`);
+    const plan = (await c.query("select id, business_id, status from marketing_plans where id = $1 for update", [v.plan_id])).rows[0];
+    if (!plan) throw notFound("Plan");
+    if (plan.status !== "draft") throw new HttpError(409, "plan_published", "Choose a draft plan. A published plan is visible to the team and sends its tasks.");
+    if (plan.business_id !== cur.business_id) throw badRequest("That plan belongs to another business.");
+    let brandName = cur.tracker_brand_name, personName = cur.tracker_assignee_name;
+    if (dir) {
+      const chk = checkAgainstDirectory(dir, cur.business_id, { brand_id: cur.tracker_brand_id, assignee_id: cur.tracker_assignee_id });
+      if (!chk.ok) throw new HttpError(422, chk.code, chk.message);
+      brandName = chk.brand.name; personName = chk.person.name;
+    }
+    if (!brandName || !personName) throw new HttpError(503, "tracker_unavailable", "Task Tracker could not be reached to check the brand and assignee. Try again.");
+    const a = await c.query(`insert into plan_assignments (plan_id, sort_order, title, brief, tracker_brand_id, tracker_brand_name, tracker_assignee_id, tracker_assignee_name, due_date)
+                             values ($1, (select coalesce(max(sort_order), -1) + 1 from plan_assignments where plan_id = $1), $2, $3, $4, $5, $6, $7, $8) returning id`,
+      [plan.id, cur.title, cur.brief, cur.tracker_brand_id, brandName, cur.tracker_assignee_id, personName, cur.due_date_s]);
+    // The plan changed: an editor still open on the old version must reload instead of overwriting the new item.
+    await c.query("update marketing_plans set updated_at = now(), version = version + 1 where id = $1", [plan.id]);
+    await c.query(`update review_suggestions set status = 'planned', plan_id = $2, plan_assignment_id = $3, planned_at = now(), reviewed_at = coalesce(reviewed_at, now()),
+                     updated_at = now(), version = version + 1 where id = $1`, [id, plan.id, a.rows[0].id]);
+  });
+  return getSuggestion(s, id);
+}
+
+/** A planned suggestion whose plan item was removed (or whose plan was deleted) can come back to the review list. */
+export async function returnToReview(s: Session, id: string, version: number) {
+  assertReviewer(s);
+  await tx(async (c) => {
+    const cur = await row(id, c, true);
+    if (!cur) throw notFound("Suggestion");
+    if (cur.version !== version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload first.");
+    if (cur.status !== "planned") throw new HttpError(409, "not_planned", "This suggestion is not in a plan.");
+    if (cur.plan_assignment_id) throw new HttpError(409, "still_planned", "It is still in the plan. Remove it from the plan first.");
+    await c.query(`update review_suggestions set status = 'pending', plan_id = null, planned_at = null, updated_at = now(), version = version + 1 where id = $1`, [id]);
   });
   return getSuggestion(s, id);
 }

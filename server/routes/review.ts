@@ -2,7 +2,7 @@
 import type { Router } from "../router";
 import { badRequest, readJson } from "../http";
 import { z } from "zod";
-import { assertReviewer, pendingCount, listSuggestions, getSuggestion, editSuggestion, editSchema, previewSuggestion, createFromSuggestion, dismissSuggestion, refreshSuggestion } from "../review";
+import { assertReviewer, pendingCount, listSuggestions, getSuggestion, editSuggestion, editSchema, previewSuggestion, addToPlanSchema, addToPlan, planChoices, returnToReview, createFromSuggestion, dismissSuggestion, refreshSuggestion } from "../review";
 
 const version = z.object({ version: z.number().int().min(1) }).strict();
 
@@ -11,7 +11,7 @@ export function registerReview(r: Router) {
   r.get("/review/suggestions", async ({ url, session }) => {
     assertReviewer(session);
     const status = url.searchParams.get("status") ?? "pending", q = url.searchParams.get("q");
-    if (!["pending", "approved", "dismissed", "all"].includes(status)) throw badRequest("Invalid status.");
+    if (!["pending", "planned", "approved", "dismissed", "all"].includes(status)) throw badRequest("Invalid status.");
     if (q && q.length > 100) throw badRequest("Search is too long.");
     return { items: await listSuggestions(session, status, q) };
   });
@@ -34,6 +34,19 @@ export function registerReview(r: Router) {
     const v = version.safeParse(await readJson(req));
     if (!v.success) throw badRequest("version is required.");
     return { suggestion: await dismissSuggestion(session, params.id, v.data.version) };
+  }, "viewer");
+  r.get("/review/suggestions/:id/plans", async ({ params, session }) => planChoices(session, params.id));
+  r.post("/review/suggestions/:id/add-to-plan", async ({ req, params, session }) => {
+    assertReviewer(session);
+    const v = addToPlanSchema.safeParse(await readJson(req));
+    if (!v.success) throw badRequest("version and plan_id are required.");
+    return { suggestion: await addToPlan(session, params.id, v.data) };
+  }, "viewer");
+  r.post("/review/suggestions/:id/return", async ({ req, params, session }) => {
+    assertReviewer(session);
+    const v = version.safeParse(await readJson(req));
+    if (!v.success) throw badRequest("version is required.");
+    return { suggestion: await returnToReview(session, params.id, v.data.version) };
   }, "viewer");
   r.post("/review/suggestions/:id/refresh", async ({ params, session }) => ({ suggestion: await refreshSuggestion(session, params.id) }), "viewer");
 }
