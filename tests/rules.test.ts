@@ -289,6 +289,30 @@ describe("Daily Analytics Report and EOS scorecard layouts", () => {
     expect(out.find((b) => b.business === "p2s" && b.month === "2026-09")!.observations.find((o) => o.metric === "ad_spend")!.value).toBe(3);
   });
 
+  it("gives one total per platform and month when two rows name the same platform, and flags rows that disagree", async () => {
+    const { parseEosMonths } = await import("../shared/scorecardParse");
+    // Sep: both filled and equal. Oct: both filled and different. Nov: only the Meta row filled. Dec: ended? no (today).
+    const sheet = { name: "2026", rows: [[], [], [null, null, "AUG 1-31", "SEP 1-30", "OCT 1-31"], [null, null, "TOTAL (MONTH)", "TOTAL (MONTH)", "TOTAL (MONTH)"],
+      ["Revenue", "All", 90, 100, 80],
+      ["Ads Spent", "Google Ads SB", 4, 10, 10], [null, "Facebook Ads SB", null, 5, 5], [null, "Meta Ads SB", 6, 5, 8],
+      [null, "Total Ad spent (Succulents Box)", 10, 15, 23]] };
+    const out = parseEosMonths([sheet], { today: "2026-11-18" });
+    const sb = (month: string) => out.find((b) => b.business === "sb" && b.month === month)!;
+    const fb = (month: string) => sb(month).observations.filter((o) => o.metric === "ad_spend" && o.scope === "platform:facebook");
+    expect(fb("2026-08").map((o) => o.value)).toEqual([6]);           // one row filled: that value
+    expect(fb("2026-09").map((o) => o.value)).toEqual([5]);           // both filled and equal: counted once, never 10
+    expect(sb("2026-09").notes).toEqual([]);
+    expect(fb("2026-10")).toEqual([]);                                // 5 vs 8: neither added (13) nor picked
+    expect(sb("2026-10").notes).toEqual([expect.stringMatching(/Meta \(Facebook\) Ads for 2026-10 left out: .*Facebook Ads SB 5 vs Meta Ads SB 8/)]);
+    // The other platforms and the scorecard's own total row are unaffected.
+    expect(sb("2026-10").observations.filter((o) => o.metric === "ad_spend").map((o) => [o.scope, o.value])).toEqual([["platform:google", 10], ["all", 23]]);
+    // Never more than one observation per metric and scope in a month.
+    for (const b of out) {
+      const keys = b.observations.map((o) => `${o.metric}|${o.scope}`);
+      expect(new Set(keys).size).toBe(keys.length);
+    }
+  });
+
   it("an all-blank Ads section sends no ad spend and no total", async () => {
     const { parseEosMonths } = await import("../shared/scorecardParse");
     const sheet = { name: "2026", rows: [[], [], [null, null, "OCT 1-31"], [null, null, "TOTAL (MONTH)"], ["Revenue", "All", 100],

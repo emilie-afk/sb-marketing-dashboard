@@ -130,11 +130,13 @@ export function parseEosMonths(sheets: Sheet[], opts: { fromYear?: number; today
       if (end >= opts.today) continue;                       // the month has not ended: its column is not final
       let section = "";
       const val: Record<string, number | null> = {};
+      const rowName: Record<string, string> = {};
       for (const row of sh.rows) {
         const a = label(row?.[0]), b = label(row?.[1]);
         if (a) section = /^revenue/i.test(a) ? "rev" : /^conversion/i.test(a) ? "conv" : /^human/i.test(a) ? "bot" : /^ads/i.test(a) ? "ads" : /^highlight/i.test(a) ? "hl" : a.toLowerCase();
         if (!b) continue;
         val[`${section}|${b.toLowerCase()}`] = amount(row[c]);
+        rowName[`${section}|${b.toLowerCase()}`] = b;
       }
       const all = val["rev|all"];
       if (all === null || all === undefined) continue;
@@ -154,21 +156,33 @@ export function parseEosMonths(sheets: Sheet[], opts: { fromYear?: number; today
       add(sb, "conversion_rate", "all", val["conv|converted"]);
       // Every "<Platform> Ads SB" row in the Ads section is that platform's month spend (Google, Facebook, Amazon, and any
       // platform added to the scorecard later). Its scope matches the campaign rows' platform name (platform:<key>).
+      // Rows that name the same platform (e.g. "Facebook Ads SB" and "Meta Ads SB") give ONE total per platform and month.
+      // Filled rows that agree count once; filled rows that disagree are never added together or picked between: that
+      // platform's total is left out for the month and the conflict is noted in the sync report.
       let anyPlatform = false;
+      const notes: string[] = [];
+      const byKey = new Map<string, { label: string; filled: { row: string; v: number }[] }>();
       for (const [k, v] of Object.entries(val)) {
         const m = /^ads\|(.+?)\s+ads\s+sb$/.exec(k);
         if (!m) continue;
         const p = adPlatform(m[1]);
         if (!p) continue;
-        add(sb, "ad_spend", `platform:${p.key}`, v, p.label);
-        if (v !== null && v !== undefined) anyPlatform = true;
+        const g = byKey.get(p.key) ?? { label: p.label, filled: [] };
+        byKey.set(p.key, g);
+        if (v !== null && v !== undefined) { g.filled.push({ row: rowName[k] ?? k, v }); anyPlatform = true; }
+      }
+      for (const [key, g] of byKey) {
+        if (!g.filled.length) continue;
+        const first = g.filled[0].v;
+        if (g.filled.every((x) => Math.abs(x.v - first) < 0.005)) add(sb, "ad_spend", `platform:${key}`, first, g.label);
+        else notes.push(`${g.label} for ${start.slice(0, 7)} left out: the scorecard rows disagree (${g.filled.map((x) => `${x.row} ${x.v}`).join(" vs ")}). Keep one row filled for this platform.`);
       }
       // The total row is a formula that shows 0 for an empty month, so it is only used when a platform is filled in.
       if (anyPlatform) add(sb, "ad_spend", "all", val["ads|total ad spent (succulents box)"], SCOPE_LABELS.sb_all);
       add(p2s, "revenue", "all", p2sRev, SCOPE_LABELS.p2s_all);
       add(p2s, "ad_spend", "all", val["ads|photostosketches"], "Etsy Ads");
       const month = start.slice(0, 7);
-      if (sb.length) out.push({ business: "sb", month, observations: sb, notes: [] });
+      if (sb.length) out.push({ business: "sb", month, observations: sb, notes });
       if (p2s.length) out.push({ business: "p2s", month, observations: p2s, notes: [] });
     }
   }
