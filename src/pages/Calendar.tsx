@@ -14,12 +14,13 @@ function monthGrid(month: string) {
   return Array.from({ length: 42 }, (_, i) => addDays(start, i));
 }
 
-const VIEWS: [string, string][] = [["agenda", "Year agenda"], ["month", "Month grid"], ["week", "Week"], ["list", "List"]];
+const VIEWS: [string, string][] = [["year", "Year at a glance"], ["agenda", "Agenda"], ["month", "Month grid"], ["week", "Week"], ["list", "List"]];
 
 export function CalendarPage({ role = "viewer", planningOwner = false }: { role?: Role; planningOwner?: boolean }) {
   const today = todayIn(OPERATIONS_TZ);
   const [q, setQ] = useHashQuery();
-  const view = VIEWS.some(([k]) => k === q.get("view")) ? q.get("view")! : "agenda";
+  const view = VIEWS.some(([k]) => k === q.get("view")) ? q.get("view")! : "year";
+  const occasionView = view === "year" || view === "agenda";
   const business = q.get("business") ?? "";
   const seasonal = q.get("seasonal") !== "0";
   const anchor = /^\d{4}-\d{2}-\d{2}$/.test(q.get("date") ?? "") ? q.get("date")! : today;
@@ -32,24 +33,25 @@ export function CalendarPage({ role = "viewer", planningOwner = false }: { role?
   const month = anchor.slice(0, 7);
   const days = view === "month" ? monthGrid(month) : view === "week" ? Array.from({ length: 7 }, (_, i) => addDays(anchor, i - ((new Date(anchor + "T00:00:00Z").getUTCDay() + 6) % 7))) : [];
   const from = view === "list" ? anchor : days[0], to = view === "list" ? addDays(anchor, 60) : days[days.length - 1];
-  const s = useApi<any>(view === "agenda" ? null : `/calendar?from=${from}&to=${to}&types=${types.join(",")}${business ? `&business=${business}` : ""}${seasonal ? "" : "&seasonal=0"}`, [view, from, to, types.join(","), business, seasonal]);
+  const s = useApi<any>(occasionView ? null : `/calendar?from=${from}&to=${to}&types=${types.join(",")}${business ? `&business=${business}` : ""}${seasonal ? "" : "&seasonal=0"}`, [view, from, to, types.join(","), business, seasonal]);
   const step = (n: number) => setQ({ date: view === "month" ? `${addMonthsStr(month, n)}-01` : addDays(anchor, n * (view === "week" ? 7 : 30)) });
-  const title = view === "month" ? new Date(`${month}-01T00:00:00Z`).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }) : view === "agenda" ? "" : range({ start: from, end: to });
+  const title = view === "month" ? new Date(`${month}-01T00:00:00Z`).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }) : occasionView ? "" : range({ start: from, end: to });
   const openItem = (it: any) => { if (it.type === "gift") setGift({ id: it.occasionId, year: it.year }); else if (it.type === "promotion" || it.type === "launch" || it.type === "deadline") setOpen(it.id); else if (it.type === "task" && it.source === "tracker" && typeof it.open_url === "string" && it.open_url.startsWith("https://")) window.open(it.open_url, "_blank", "noopener,noreferrer"); else if (it.type === "task") location.hash = "#/tasks"; else if (it.type === "occasion") setSheetOcc({ title: it.title, start: it.start, end: it.end, brands: [it.business], ids: [{ id: it.id, business: it.business, selected: !!it.promotionId }], promotions: [] }); };
   const limit = view === "week" ? 12 : 4;
   return (
     <div>
-      <Tabs tabs={VIEWS} value={view} onChange={(v) => setQ({ view: v === "agenda" ? null : v }, { push: true })} />
+      <Tabs tabs={VIEWS} value={view} onChange={(v) => setQ({ view: v === "year" ? null : v }, { push: true })} />
       <div className="toolbar">
-        {view !== "agenda" && <><button className="btn small" onClick={() => step(-1)} aria-label="Previous">Previous</button><b>{title}</b><button className="btn small" onClick={() => step(1)} aria-label="Next">Next</button>
+        {!occasionView && <><button className="btn small" onClick={() => step(-1)} aria-label="Previous">Previous</button><b>{title}</b><button className="btn small" onClick={() => step(1)} aria-label="Next">Next</button>
           <button className="btn small" onClick={() => setQ({ date: null })}>Today</button></>}
         <label>Business <select value={business} onChange={(e) => setQ({ business: e.target.value || null })}><option value="">All</option>{Object.entries(BUSINESS_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
-        {view === "agenda" ? <label>Occasion type <select value={q.get("otype") ?? "all"} onChange={(e) => setQ({ otype: e.target.value === "all" ? null : e.target.value })}><option value="all">All occasions</option><option value="gift">Gift occasions</option><option value="sheet">Spreadsheet occasions</option></select></label>
+        {occasionView ? <label>Occasion type <select value={q.get("otype") ?? "all"} onChange={(e) => setQ({ otype: e.target.value === "all" ? null : e.target.value })}><option value="all">All occasions</option><option value="gift">Gift occasions</option><option value="sheet">Spreadsheet occasions</option></select></label>
           : TYPES.map(([k, l]) => <button key={k} className={`chip ${types.includes(k) ? "on" : ""}`} aria-pressed={types.includes(k)} onClick={() => setQ({ types: (types.includes(k) ? types.filter((x) => x !== k) : [...types, k]).join(",") })}>{l}</button>)}
         <button className={`chip ${seasonal ? "on" : ""}`} aria-pressed={seasonal} onClick={() => setQ({ seasonal: seasonal ? "0" : null })} title="Multi-week windows such as wedding season and back to school">Seasonal windows</button>
         {role !== "viewer" && <button className="btn small" onClick={() => setCreating(true)}>New promotion</button>}
       </div>
-      {view === "agenda" ? <Agenda q={q} setQ={setQ} today={today} business={business} seasonal={seasonal} owner={planningOwner} onGift={setGift} onSheet={setSheetOcc} onPromotion={setOpen} /> : <>
+      {view === "year" ? <YearGlance q={q} setQ={setQ} today={today} business={business} seasonal={seasonal} onGift={setGift} onSheet={(it: any) => setSheetOcc({ ...it, owner: planningOwner })} />
+        : view === "agenda" ? <Agenda q={q} setQ={setQ} today={today} business={business} seasonal={seasonal} owner={planningOwner} onGift={setGift} onSheet={setSheetOcc} onPromotion={setOpen} /> : <>
       <div className="row legend" aria-label="Legend">{LEGEND.map(([k, l]) => <span key={k} className={`ev ${k}`}>{l}</span>)}<span className="ev gift season">Seasonal window</span></div>
       <Async s={s}>{(d) => <>
         <p className="sub">{d.timezoneNote} An occasion becomes a promotion only when it is selected for use.</p>
@@ -129,6 +131,53 @@ function Agenda({ q, setQ, today, business, seasonal, owner, onGift, onSheet, on
       </>;
     }}</Async>
     {!next90 && <YearRound business={business} year={year} />}
+  </>;
+}
+
+const QUARTER_MONTHS = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]];
+const MONTH_LIMIT = 4;
+const shortRange = (it: any) => it.tbc ? "Dates TBC" : it.start === it.end ? new Date(`${it.start}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) : range({ start: it.start, end: it.end }).replace(/, \d{4}/g, "");
+
+/**
+ * Year at a glance: four quarters of three months, every month shown (quiet ones too), occasion dates and names only.
+ * Seasonal windows show as date ranges; an occasion shared by several brands shows once with its brands. Promotions
+ * and preparation tasks are in the occasion's drawer and its plan, not here. Busy months expand in place.
+ */
+function YearGlance({ q, setQ, today, business, seasonal, onGift, onSheet }: any) {
+  const thisYear = Number(today.slice(0, 4));
+  const year = /^\d{4}$/.test(q.get("year") ?? "") ? Number(q.get("year")) : thisYear;
+  const otype = q.get("otype") ?? "all";
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const s = useApi<any>(`/occasions/agenda?from=${year}-01-01&to=${year}-12-31&type=${otype}${business ? `&business=${business}` : ""}${seasonal ? "" : "&seasonal=0"}`, [year, otype, business, seasonal]);
+  return <>
+    <div className="row" style={{ marginBottom: 6 }}>
+      <b>{year} at a glance</b>
+      <label className="sub">Year <select aria-label="Year" value={year} onChange={(e) => { setOpen(new Set()); setQ({ year: e.target.value === String(thisYear) ? null : e.target.value }); }}>
+        {[thisYear - 1, thisYear, thisYear + 1, thisYear + 2].map((y) => <option key={y} value={y}>{y}</option>)}</select></label>
+      <span className="row legend" aria-label="Legend"><span className="ev gift">Gift occasion</span><span className="ev gift season">Seasonal window</span><span className="ev occasion">Spreadsheet occasion</span></span>
+    </div>
+    <Async s={s}>{(d) => {
+      const byMonth = new Map<number, any[]>();
+      for (const it of d.items) { const m = it.inProgress ? 1 : Number(it.start.slice(5, 7)); byMonth.set(m, [...(byMonth.get(m) ?? []), it]); }
+      return <div className="year-glance">{QUARTER_MONTHS.map((qm, qi) => <section key={qi} className="quarter" aria-label={`Quarter ${qi + 1}`}>
+        <h3 className="quarter-title">Q{qi + 1} <span className="sub">{monthTitle(`${year}-${String(qm[0]).padStart(2, "0")}`).split(" ")[0]} – {monthTitle(`${year}-${String(qm[2]).padStart(2, "0")}`)}</span></h3>
+        <div className="q-months">{qm.map((m) => {
+          const key = `${year}-${String(m).padStart(2, "0")}`, list = byMonth.get(m) ?? [], all = open.has(key);
+          return <div key={m} className={`month-card ${key === today.slice(0, 7) ? "now" : ""}`} id={`y-${key}`}>
+            <h4>{monthTitle(key).split(" ")[0]} {list.length > 0 && <span className="sub">{list.length}</span>}</h4>
+            {!list.length ? <p className="sub quiet">No occasions</p> : <ul className="glance">{(all ? list : list.slice(0, MONTH_LIMIT)).map((it: any) => <li key={it.key}>
+              <span className="when">{shortRange(it)}</span>
+              <a href="#" className={`ev ${it.kind === "gift" ? "gift" : "occasion"}${it.seasonal ? " season" : ""}`} title={`${it.title} · ${it.brands.map((b: string) => BUSINESS_NAMES[b] ?? b).join(" and ")}`}
+                onClick={(e) => { e.preventDefault(); it.kind === "gift" ? onGift({ id: it.occasionId, year: it.year }) : onSheet(it); }}>{it.title}</a>
+              {!business && it.brands.length > 0 && <span className="brands sub">{it.brands.map((b: string) => BUSINESS_NAMES[b] ?? b).join(" · ")}</span>}
+            </li>)}</ul>}
+            {list.length > MONTH_LIMIT && <button type="button" className="btn small link" aria-expanded={all} onClick={() => setOpen((o) => { const n = new Set(o); n.has(key) ? n.delete(key) : n.add(key); return n; })}>
+              {all ? "Show fewer" : `Show all ${list.length}`}</button>}
+          </div>; })}</div>
+      </section>)}</div>;
+    }}</Async>
+    <p className="sub">{"Gift occasions are all-day U.S. dates. Open an occasion for its linked plans and promotions; preparation tasks live in its plan."}</p>
+    <YearRound business={business} year={year} />
   </>;
 }
 

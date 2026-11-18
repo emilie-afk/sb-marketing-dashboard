@@ -22,6 +22,7 @@ export type TaskRow = {
   source: "dashboard" | "tracker"; read_only: boolean; open_url: string | null; recurring: boolean; recurrence: string | null;
   promotion_id: string | null; promotion_title: string | null; version: number | null; file_count: number;
   category?: string | null;      // "Corporate Gifts" for Task Tracker tasks created from Corporate Gifts
+  occasion?: string | null;      // "Black Friday 2026": the gift occasion a Task Tracker task was created for
 };
 
 const vnDate = (ts: string | Date | null) => (ts ? todayIn(OPERATIONS_TZ, new Date(ts)) : null);
@@ -72,7 +73,12 @@ export async function gatherTasks(business: string | null, from: string, to: str
   const tracker = await query<any>(
     `select source_instance, record_id, task_id, kind, business_id, title, task_type, assignee_name, assignee_archived, recurrence,
             to_char(due_date,'YYYY-MM-DD') due_date, to_char(occurrence_date,'YYYY-MM-DD') occurrence_date, status, to_char(completed_on,'YYYY-MM-DD') completed_on,
-            exists (select 1 from corporate_task_drafts cg where cg.tracker_task_id = tracker_task_records.task_id) as corporate
+            exists (select 1 from corporate_task_drafts cg where cg.tracker_task_id = tracker_task_records.task_id) as corporate,
+            -- The occasion a task was created for: a Slack Review suggestion linked to it, or the plan it came from.
+            coalesce((select g.name || ' ' || rs.occasion_year from review_suggestions rs join gift_occasions g on g.id = rs.occasion_id
+                       where rs.tracker_task_id = tracker_task_records.task_id and rs.occasion_status = 'confirmed' limit 1),
+                     (select g.name || ' ' || mp.occurrence_year from plan_assignments pa join marketing_plans mp on mp.id = pa.plan_id join gift_occasions g on g.id = mp.gift_occasion_id
+                       where pa.tracker_task_id = tracker_task_records.task_id and mp.status = 'published' limit 1)) as occasion
        from tracker_task_records
       where removed_at is null and ($1::text is null or business_id = $1)
         and (kind = 'task' or occurrence_date between $2 and $3)
@@ -84,7 +90,7 @@ export async function gatherTasks(business: string | null, from: string, to: str
       owner: r.assignee_name, owner_archived: r.assignee_archived, status: r.status === "done" ? "done" : "todo", due_date: r.due_date,
       completed_on: r.status === "done" ? r.completed_on ?? r.due_date : null, completed_basis: r.status === "done" ? (r.completed_on ? "completion" : r.due_date ? "due_date" : null) : null,
       source: "tracker", read_only: true, open_url: openUrl(r.task_id), recurring: !!occurrence, recurrence: r.recurrence,
-      promotion_id: null, promotion_title: null, version: null, file_count: 0, category: r.corporate ? "Corporate Gifts" : null });
+      promotion_id: null, promotion_title: null, version: null, file_count: 0, category: r.corporate ? "Corporate Gifts" : null, occasion: r.occasion ?? null });
   }
   void today;
   return rows;

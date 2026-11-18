@@ -2,8 +2,8 @@
 import type { Router } from "../router";
 import { badRequest, readJson } from "../http";
 import { z } from "zod";
-import { assertReviewer, pendingCount, listSuggestions, getSuggestion, editSuggestion, editSchema, previewSuggestion, addToPlanSchema, addToPlan, planChoices, returnToReview, createFromSuggestion, dismissSuggestion, refreshSuggestion } from "../review";
-import { pendingCorporateCount, listDrafts, editDraft, draftEditSchema, bulkAssign, bulkAssignSchema, sendDrafts, dismissDraft, refreshDrafts } from "../corporateTasks";
+import { assertReviewer, pendingCount, listSuggestions, getSuggestion, editSuggestion, editSchema, previewSuggestion, addToPlanSchema, addToPlan, planChoices, returnToReview, createFromSuggestion, dismissSuggestion, refreshSuggestion, resolveSuggestion, classifySuggestion, classifySchema } from "../review";
+import { pendingCorporateCount, listDrafts, editDraft, draftEditSchema, bulkAssign, bulkAssignSchema, sendDrafts, dismissDraft, resolveDraft, refreshDrafts, getDraft } from "../corporateTasks";
 
 const version = z.object({ version: z.number().int().min(1) }).strict();
 
@@ -11,10 +11,11 @@ export function registerReview(r: Router) {
   r.get("/review/summary", async ({ session }) => ({ pending: await pendingCount(session) }));
   r.get("/review/suggestions", async ({ url, session }) => {
     assertReviewer(session);
-    const status = url.searchParams.get("status") ?? "pending", q = url.searchParams.get("q");
-    if (!["pending", "planned", "approved", "dismissed", "all"].includes(status)) throw badRequest("Invalid status.");
+    const status = url.searchParams.get("status") ?? "pending", q = url.searchParams.get("q"), occasion = url.searchParams.get("occasion") ?? "all";
+    if (!["pending", "planned", "approved", "resolved", "dismissed", "all"].includes(status)) throw badRequest("Invalid status.");
+    if (!["all", "unclassified", "classified"].includes(occasion)) throw badRequest("Invalid occasion filter.");
     if (q && q.length > 100) throw badRequest("Search is too long.");
-    return { items: await listSuggestions(session, status, q) };
+    return { items: await listSuggestions(session, status, q, occasion as any) };
   });
   r.get("/review/suggestions/:id", async ({ params, session }) => ({ suggestion: await getSuggestion(session, params.id) }));
   r.patch("/review/suggestions/:id", async ({ req, params, session }) => {
@@ -36,6 +37,18 @@ export function registerReview(r: Router) {
     if (!v.success) throw badRequest("version is required.");
     return { suggestion: await dismissSuggestion(session, params.id, v.data.version) };
   }, "viewer");
+  r.post("/review/suggestions/:id/resolve", async ({ req, params, session }) => {
+    assertReviewer(session);
+    const v = version.safeParse(await readJson(req));
+    if (!v.success) throw badRequest("version is required.");
+    return { suggestion: await resolveSuggestion(session, params.id, v.data.version) };
+  }, "viewer");
+  r.post("/review/suggestions/:id/classify", async ({ req, params, session }) => {
+    assertReviewer(session);
+    const v = classifySchema.safeParse(await readJson(req));
+    if (!v.success) throw badRequest(`${v.error.issues[0]?.path.join(".") || "occasion"}: ${v.error.issues[0]?.message ?? "invalid"}`);
+    return { suggestion: await classifySuggestion(session, params.id, v.data) };
+  }, "viewer");
   r.get("/review/suggestions/:id/plans", async ({ params, session }) => planChoices(session, params.id));
   r.post("/review/suggestions/:id/add-to-plan", async ({ req, params, session }) => {
     assertReviewer(session);
@@ -56,9 +69,10 @@ export function registerReview(r: Router) {
   r.get("/review/corporate", async ({ url, session }) => {
     assertReviewer(session);
     const status = url.searchParams.get("status") ?? "pending";
-    if (!["pending", "approved", "dismissed", "all"].includes(status)) throw badRequest("Invalid status.");
+    if (!["pending", "approved", "resolved", "dismissed", "all"].includes(status)) throw badRequest("Invalid status.");
     return listDrafts(session, status);
   });
+  r.get("/review/corporate/:id", async ({ params, session }) => ({ draft: await getDraft(session, params.id) }));
   r.patch("/review/corporate/:id", async ({ req, params, session }) => {
     assertReviewer(session);
     const v = draftEditSchema.safeParse(await readJson(req));
@@ -82,6 +96,12 @@ export function registerReview(r: Router) {
     const v = version.safeParse(await readJson(req));
     if (!v.success) throw badRequest("version is required.");
     return { draft: await dismissDraft(session, params.id, v.data.version) };
+  }, "viewer");
+  r.post("/review/corporate/:id/resolve", async ({ req, params, session }) => {
+    assertReviewer(session);
+    const v = version.safeParse(await readJson(req));
+    if (!v.success) throw badRequest("version is required.");
+    return { draft: await resolveDraft(session, params.id, v.data.version) };
   }, "viewer");
   r.post("/review/corporate/refresh", async ({ session }) => refreshDrafts(session), "viewer");
 }

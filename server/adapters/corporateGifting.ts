@@ -158,7 +158,10 @@ export async function corporateWorkflow(now = Date.now()): Promise<CorporateWork
 
 // Corporate Gifts tasks (explicit, open actions for its marketplaces) that this dashboard turns into Task Tracker
 // tasks after the planning owner's review. Read with the same reporting credential; the only write on that
-// connection is the delivery receipt (in review / delivered with the Task Tracker task id / failed / dismissed).
+// connection is the delivery receipt (in review / delivered with the Task Tracker task id / failed / dismissed /
+// resolved). "resolved" (handled without a task) is shared by both apps: Corporate Gifts lists it in the feed when it
+// was resolved there, and advertises `capabilities: ["resolved"]` once it accepts "resolved" receipts. Until then the
+// dashboard holds its own resolutions back instead of sending a state Corporate Gifts would refuse.
 const cgTaskSchema = z.object({
   id: z.string().uuid(),
   title: z.string().min(1).max(300),
@@ -167,7 +170,7 @@ const cgTaskSchema = z.object({
   due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
   slack_status: z.enum(["open", "done", "cancelled"]),
   content_version: z.number().int().min(1),
-  delivery_status: z.enum(["pending", "in_review", "delivered", "failed", "dismissed"]),
+  delivery_status: z.enum(["pending", "in_review", "delivered", "failed", "dismissed", "resolved"]),
   delivered_version: z.number().int().nullable(),
   tracker_task_id: z.string().max(80).nullable(),
   // Links must point at the Corporate Gifting app itself (its configured origin).
@@ -176,9 +179,10 @@ const cgTaskSchema = z.object({
   }, "must link to the Corporate Gifting app") })).max(20),
 });
 export type CgTask = z.infer<typeof cgTaskSchema>;
-const cgTasksPage = z.object({ ok: z.literal(true), schema_version: z.literal(1), as_of: z.string(), tasks: z.array(z.unknown()).max(200) });
+const cgTasksPage = z.object({ ok: z.literal(true), schema_version: z.literal(1), as_of: z.string(), tasks: z.array(z.unknown()).max(200),
+  capabilities: z.array(z.string().max(40)).max(20).optional() });
 
-export async function fetchCorporateTasks(since: string | null): Promise<{ as_of: string; tasks: CgTask[]; rejected: number }> {
+export async function fetchCorporateTasks(since: string | null): Promise<{ as_of: string; tasks: CgTask[]; rejected: number; resolvedSupported: boolean }> {
   if (!corporateGiftingCredentials()) throw new HttpError(503, "not_configured", "Corporate Gifting is not connected.");
   const origin = originOf(process.env.CORPORATE_GIFTING_API_URL)!;
   const headers = { authorization: `Bearer ${process.env.CORPORATE_GIFTING_REPORTING_SECRET}` };
@@ -186,11 +190,11 @@ export async function fetchCorporateTasks(since: string | null): Promise<{ as_of
   const tasks: CgTask[] = [];
   let rejected = 0;
   for (const t of page.tasks) { const r = cgTaskSchema.safeParse(t); if (r.success) tasks.push(r.data); else rejected++; }
-  return { as_of: page.as_of, tasks, rejected };
+  return { as_of: page.as_of, tasks, rejected, resolvedSupported: (page.capabilities ?? []).includes("resolved") };
 }
 
 export type TaskReceipt = {
-  id: string; content_version: number; state: "in_review" | "delivered" | "failed" | "dismissed";
+  id: string; content_version: number; state: "in_review" | "delivered" | "failed" | "dismissed" | "resolved";
   tracker?: { task_id: string; status: "open" | "done" | "deleted"; assignee?: string | null; due_date?: string | null; open_url?: string | null };
   error?: string;
 };

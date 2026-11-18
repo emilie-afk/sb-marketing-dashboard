@@ -65,7 +65,7 @@ export const LOCKED_DELIVERY = ["sending", "created", "unknown"];
 // ------------------------------------------------------------ reading
 const PLAN_COLS = `p.id, p.business_id, p.name, p.gift_occasion_id, p.occurrence_year, p.sheet_occasion_id, p.promotion_id,
   to_char(p.prep_start,'YYYY-MM-DD') prep_start, to_char(p.campaign_start,'YYYY-MM-DD') campaign_start, to_char(p.campaign_end,'YYYY-MM-DD') campaign_end,
-  p.objective, p.channels, p.target_audience, p.message_angle, p.deliverables, p.notes, p.status, p.published_at, p.created_by, p.created_at, p.updated_at, p.version,
+  p.objective, p.channels, p.categories, p.target_audience, p.message_angle, p.deliverables, p.notes, p.status, p.published_at, p.created_by, p.created_at, p.updated_at, p.version,
   g.name gift_occasion_name, o.name sheet_occasion_name, to_char(o.occasion_date,'YYYY-MM-DD') sheet_occasion_date, pr.title promotion_title`;
 const PLAN_FROM = `marketing_plans p left join gift_occasions g on g.id = p.gift_occasion_id left join occasions o on o.id = p.sheet_occasion_id left join promotions pr on pr.id = p.promotion_id`;
 
@@ -110,7 +110,7 @@ function assignmentDto(a: any) {
 function planDto(p: any, assignments: any[], full: boolean) {
   const base = {
     id: p.id, business_id: p.business_id, business: BUSINESS_LABEL[p.business_id] ?? p.business_id, name: p.name, status: p.status, published_at: p.published_at,
-    prep_start: p.prep_start, campaign_start: p.campaign_start, campaign_end: p.campaign_end, channels: p.channels,
+    prep_start: p.prep_start, campaign_start: p.campaign_start, campaign_end: p.campaign_end, channels: p.channels, categories: p.categories ?? [],
     occasion: p.gift_occasion_id ? { kind: "gift", id: p.gift_occasion_id, name: p.gift_occasion_name, year: p.occurrence_year }
       : p.sheet_occasion_id ? { kind: "sheet", id: p.sheet_occasion_id, name: p.sheet_occasion_name, date: p.sheet_occasion_date } : null,
     promotion: p.promotion_id ? { id: p.promotion_id, title: p.promotion_title } : null,
@@ -126,7 +126,7 @@ function planDto(p: any, assignments: any[], full: boolean) {
   return { ...base, assignments: base.assignments.filter((a) => a.task).map(({ delivery, ...a }) => ({ ...a, task: a.task && { ...a.task, version_read: undefined, read_at: undefined } })), pending_count: undefined, unresolved_count: undefined, version: undefined };
 }
 
-export type PlanFilters = { year?: number | null; business?: string | null; channel?: string | null; status?: string | null; q?: string | null; occasion?: { gift?: string; year?: number; sheet?: string[] } | null };
+export type PlanFilters = { year?: number | null; business?: string | null; channel?: string | null; category?: string | null; status?: string | null; q?: string | null; occasion?: { gift?: string; year?: number; sheet?: string[] } | null };
 
 export async function listPlans(s: Session, f: PlanFilters = {}) {
   const params: unknown[] = [];
@@ -134,6 +134,7 @@ export async function listPlans(s: Session, f: PlanFilters = {}) {
   if (f.year) { params.push(f.year); where.push(`(extract(year from p.campaign_start) = $${params.length} or extract(year from p.prep_start) = $${params.length} or p.occurrence_year = $${params.length})`); }
   if (f.business) { params.push(f.business); where.push(`p.business_id = $${params.length}`); }
   if (f.channel) { params.push(f.channel); where.push(`$${params.length} = any(p.channels)`); }
+  if (f.category) { params.push(f.category); where.push(`$${params.length} = any(p.categories)`); }
   if (f.status && isPlanningOwner(s)) { params.push(f.status); where.push(`p.status = $${params.length}`); }
   if (f.q) { params.push(`%${f.q.replace(/[\\%_]/g, (m) => "\\" + m)}%`); where.push(`(p.name ilike $${params.length} or coalesce(g.name, o.name, '') ilike $${params.length})`); }
   const rows = await query<any>(`select ${PLAN_COLS} from ${PLAN_FROM} where ${where.join(" and ")} order by p.prep_start, p.campaign_start, p.name limit 500`, params);
@@ -175,9 +176,27 @@ export async function plansByOccasion(s: Session, years: number[], sheetIds: str
 type AsgInput = { id?: string; title: string; brief?: string | null; tracker_brand_id: string; tracker_assignee_id: string; due_date: string };
 export type PlanInput = {
   business_id: string; name: string; gift_occasion_id?: string | null; occurrence_year?: number | null; sheet_occasion_id?: string | null; promotion_id?: string | null;
-  prep_start: string; campaign_start: string; campaign_end: string; objective?: string | null; channels?: string[]; target_audience?: string | null;
+  prep_start: string; campaign_start: string; campaign_end: string; objective?: string | null; channels?: string[]; categories?: string[]; target_audience?: string | null;
   message_angle?: string | null; deliverables?: string | null; notes?: string | null; assignments?: AsgInput[];
 };
+
+/** Product categories on a plan: trimmed, de-duplicated (ignoring case), at most 10. */
+export function cleanCategories(list: string[] | undefined) {
+  const out: string[] = [];
+  for (const c of list ?? []) { const t = c.trim().replace(/\s+/g, " "); if (t && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t); }
+  return out.slice(0, 10);
+}
+
+/** Category choices: the existing product categories (reused), plus categories already used on plans this person may see. */
+export async function categoryOptions(s: Session) {
+  const params: unknown[] = [];
+  const rows = await query<{ c: string; src: string }>(
+    `select distinct btrim(category) c, 'product' src from products where category is not null and btrim(category) <> ''
+     union select distinct unnest(p.categories) c, 'plan' src from marketing_plans p where ${visibleSql(s, params)}`, params);
+  const by = new Map<string, { name: string; product: boolean }>();
+  for (const r of rows) { const k = r.c.toLowerCase(); const cur = by.get(k) ?? { name: r.c, product: false }; if (r.src === "product") { cur.product = true; cur.name = r.c; } by.set(k, cur); }
+  return [...by.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
 
 async function checkLinks(c: pg.PoolClient, v: PlanInput) {
   if (v.gift_occasion_id) {
@@ -261,10 +280,10 @@ export async function createPlan(s: Session, v: PlanInput) {
   const id = await tx(async (c) => {
     await checkLinks(c, v);
     const r = await c.query(`insert into marketing_plans (business_id, name, gift_occasion_id, occurrence_year, sheet_occasion_id, promotion_id, prep_start, campaign_start, campaign_end,
-                               objective, channels, target_audience, message_angle, deliverables, notes, created_by)
-                             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) returning id`,
+                               objective, channels, target_audience, message_angle, deliverables, notes, created_by, categories)
+                             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) returning id`,
       [v.business_id, v.name, v.gift_occasion_id ?? null, v.occurrence_year ?? null, v.sheet_occasion_id ?? null, v.promotion_id ?? null, v.prep_start, v.campaign_start, v.campaign_end,
-        v.objective || null, v.channels ?? [], v.target_audience || null, v.message_angle || null, v.deliverables || null, v.notes || null, s.email]);
+        v.objective || null, v.channels ?? [], v.target_audience || null, v.message_angle || null, v.deliverables || null, v.notes || null, s.email, cleanCategories(v.categories)]);
     await writeAssignments(c, r.rows[0].id, v.business_id, v.assignments ?? [], dir);
     return r.rows[0].id as string;
   });
@@ -299,9 +318,9 @@ export async function updatePlan(s: Session, id: string, version: number, v: Pla
     impact = deadlineImpact(cur, v, await assignmentsOf([id], c));
     await c.query(`update marketing_plans set business_id = $2, name = $3, gift_occasion_id = $4, occurrence_year = $5, sheet_occasion_id = $6, promotion_id = $7,
                      prep_start = $8, campaign_start = $9, campaign_end = $10, objective = $11, channels = $12, target_audience = $13, message_angle = $14,
-                     deliverables = $15, notes = $16, updated_at = now(), version = version + 1 where id = $1`,
+                     deliverables = $15, notes = $16, categories = coalesce($17, categories), updated_at = now(), version = version + 1 where id = $1`,
       [id, v.business_id, v.name, v.gift_occasion_id ?? null, v.occurrence_year ?? null, v.sheet_occasion_id ?? null, v.promotion_id ?? null, v.prep_start, v.campaign_start, v.campaign_end,
-        v.objective || null, v.channels ?? [], v.target_audience || null, v.message_angle || null, v.deliverables || null, v.notes || null]);
+        v.objective || null, v.channels ?? [], v.target_audience || null, v.message_angle || null, v.deliverables || null, v.notes || null, v.categories ? cleanCategories(v.categories) : null]);
     if (v.assignments) await writeAssignments(c, id, v.business_id, v.assignments, dir);
   });
   return { plan: await getPlan(s, id), deadline_impact: impact };

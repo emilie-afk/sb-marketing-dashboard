@@ -4,6 +4,7 @@ import { freshDb, q, app, closePool } from "./helpers";
 import { issueSession } from "../server/auth";
 import { _setReportingFetchForTests } from "../server/adapters/reportingClient";
 import { _setPlanningTimeoutForTests } from "../server/adapters/planningClient";
+import { _setPlanningClockForTests } from "../server/planning";
 
 const OWNER = "planner@example.test";
 const CHANNEL = "C0TESTCHAN1";
@@ -366,5 +367,200 @@ describe("Add to plan", () => {
     const back = await owner("POST", `/review/suggestions/${s.id}/return`, { version: c.version });
     expect(back.body.suggestion).toMatchObject({ status: "pending", plan: null, locked: false });
     expect(tracker.creates).toBe(0);
+  });
+});
+
+// ====================================================================== occasions, timeline and in-place actions
+describe("occasion links", () => {
+  const sug = async (title: string) => (await first()).find((i: any) => i.fields.title === title);
+  const cur = async (id: string) => (await owner("GET", `/review/suggestions/${id}`)).body.suggestion;
+  const classify = async (id: string, body: Record<string, unknown>) => owner("POST", `/review/suggestions/${id}/classify`, { version: (await cur(id)).version, ...body });
+
+  it("an exact keyword is suggested at intake (not confirmed); a broad holiday reference stays unclassified", async () => {
+    const r = await scan("POST", "/review-intake/batches", batch([
+      msg({ title: "Draft the BF/CM email", excerpt: "Synthetic: someone draft the BF/CM email for the gift sets" }),
+      msg({ title: "Draft the holiday email", excerpt: "Synthetic: can someone draft the holiday email before the sale?" }),
+    ]));
+    expect(JSON.stringify(r.body)).not.toMatch(/Black Friday|black-friday/);          // the scanner's answer carries counts only
+    const bf = await sug("Draft the BF/CM email"), hol = await sug("Draft the holiday email");
+    expect(bf.occasion).toMatchObject({ status: "suggested", confirmed: false, current: { id: "black-friday", name: "Black Friday", year: 2026, dates: { start: "2026-11-27" } } });
+    expect(hol.occasion).toMatchObject({ status: "unmatched", confirmed: false, current: null, candidates: [] });
+    const unclassified = (await owner("GET", "/review/suggestions?status=pending&occasion=unclassified")).body.items.map((i: any) => i.id);
+    expect(unclassified).toEqual(expect.arrayContaining([bf.id, hol.id]));
+  });
+
+  it("confirming or changing the occasion only classifies it: still to review, no task, nothing published; a rescan keeps the choice", async () => {
+    const bf = await sug("Draft the BF/CM email");
+    const before = (await owner("GET", "/review/summary")).body.pending;
+    const ok = await classify(bf.id, { occasion: { id: "black-friday", year: 2026 } });
+    expect(ok.body.suggestion).toMatchObject({ status: "pending", occasion: { status: "confirmed", confirmed: true } });
+    const changed = await classify(bf.id, { occasion: { id: "cyber-monday", year: 2026 } });
+    expect(changed.body.suggestion.occasion.current).toMatchObject({ id: "cyber-monday", year: 2026 });
+    expect((await owner("GET", "/review/summary")).body.pending).toBe(before);
+    expect(tracker.creates).toBe(0);
+    expect((await owner("GET", "/review/suggestions?status=pending&occasion=classified")).body.items.map((i: any) => i.id)).toContain(bf.id);
+    // The same Slack message scanned again: unchanged, and Emilie's choice stays.
+    const again = await scan("POST", "/review-intake/batches", batch([{ ...msg(), message_ts: (await q("select message_ts from review_suggestions where id = $1", [bf.id]))[0].message_ts,
+      title: "Draft the BF/CM email", excerpt: "Synthetic: someone draft the BF/CM email for the gift sets" }]));
+    expect(again.body).toMatchObject({ created_count: 0, unchanged_count: 1 });
+    expect((await cur(bf.id)).occasion).toMatchObject({ status: "confirmed", current: { id: "cyber-monday", year: 2026 } });
+    // Cleared stays cleared too, including when the list matches older suggestions again.
+    const cleared = await classify(bf.id, { occasion: null });
+    expect(cleared.body.suggestion.occasion).toMatchObject({ status: "cleared", current: null });
+    await first();
+    expect((await cur(bf.id)).occasion.status).toBe("cleared");
+  });
+
+  it("older suggestions that were never matched get a suggestion when listed; wrong choices are refused; nobody else can classify", async () => {
+    const hol = await sug("Draft the holiday email");
+    await q("update review_suggestions set occasion_matched_at = null, occasion_status = 'unmatched', title = 'Order Valentine''s gift boxes' where id = $1", [hol.id]);
+    expect((await cur(hol.id)).occasion.status).toBe("unmatched");
+    await first();
+    expect((await cur(hol.id)).occasion).toMatchObject({ status: "suggested", current: { id: "valentines-day", year: 2027 } });
+    expect((await classify(hol.id, { occasion: { id: "yr-birthdays", year: 2027 } })).status).toBe(400);   // year-round: not a dated occasion
+    expect((await req("manager@example.test", "POST", `/review/suggestions/${hol.id}/classify`, { version: 1, occasion: null })).status).toBe(404);
+  });
+});
+
+describe("Next two quarters (timeline) and plan categories", () => {
+  const sug = async (title: string) => (await first()).find((i: any) => i.fields.title === title);
+  const cur = async (id: string) => (await owner("GET", `/review/suggestions/${id}`)).body.suggestion;
+  const entry = (tl: any, key: string) => tl.entries.find((e: any) => e.key === key);
+  beforeAll(() => _setPlanningClockForTests(() => new Date("2026-11-18T03:00:00Z")));
+  afterAll(() => _setPlanningClockForTests(null));
+
+  it("shows Jan–Jun 2027 across the year boundary, with occasions even without a plan, a suggested prep date, and unconfirmed dates without a day", async () => {
+    const tl = (await owner("GET", "/planning/timeline")).body;
+    expect(tl.months).toEqual(["2027-01", "2027-02", "2027-03", "2027-04", "2027-05", "2027-06"]);
+    const val = entry(tl, "gift:valentines-day:2027");
+    expect(val).toMatchObject({ month: "2027-02", occasion: { start: "2027-02-14", tbc: false }, suggested_prep: "2026-12-27", plans: [], start_now: true });
+    expect(entry(tl, "gift:mothers-day:2027")).toMatchObject({ month: "2027-05", start_now: false });
+    expect(entry(tl, "gift:national-volunteer-week:2027").occasion).toMatchObject({ start: "2027-04-18" });   // confirmed by override
+    expect(tl.entries.some((e: any) => e.key.startsWith("gift:christmas:"))).toBe(false);
+  });
+
+  it("an occasion-linked plan and a category-only plan; categories reuse product categories and filter both lists", async () => {
+    await q("insert into products (business_id, title, category) values ('sb', 'Synthetic gift box', 'Gift boxes'), ('sb', 'Synthetic pot', 'Pots')");
+    const opts = (await owner("GET", "/planning/categories")).body.items.map((c: any) => c.name);
+    expect(opts).toEqual(expect.arrayContaining(["Gift boxes", "Pots"]));
+    const draft = await owner("POST", "/planning/plans", { business_id: "sb", name: "Synthetic Valentine draft", gift_occasion_id: "valentines-day", occurrence_year: 2027,
+      prep_start: "2026-12-20", campaign_start: "2027-02-01", campaign_end: "2027-02-14", categories: ["Gift boxes"] });
+    expect(draft.status).toBe(200);
+    const boxes = await owner("POST", "/planning/plans", { business_id: "sb", name: "Corporate gift boxes Q1", prep_start: "2026-12-10", campaign_start: "2027-01-05", campaign_end: "2027-01-31",
+      categories: [" Corporate gift boxes ", "corporate gift boxes", "Gift boxes"] });
+    expect(boxes.body.plan).toMatchObject({ occasion: null, categories: ["Corporate gift boxes", "Gift boxes"] });
+    expect((await owner("POST", `/planning/plans/${boxes.body.plan.id}/publish`, { version: boxes.body.plan.version })).status).toBe(200);
+
+    const tl = (await owner("GET", "/planning/timeline")).body;
+    expect(entry(tl, "gift:valentines-day:2027").plans).toEqual([expect.objectContaining({ name: "Synthetic Valentine draft", status: "draft", prep_start: "2026-12-20", categories: ["Gift boxes"] })]);
+    expect(entry(tl, `plan:${boxes.body.plan.id}`)).toMatchObject({ kind: "plan", month: "2027-01", occasion: null, start_now: true, plans: [expect.objectContaining({ categories: ["Corporate gift boxes", "Gift boxes"] })] });
+    const onlyCorp = (await owner("GET", `/planning/timeline?category=${encodeURIComponent("Corporate gift boxes")}`)).body;
+    expect(onlyCorp.entries.map((e: any) => e.key)).toEqual([`plan:${boxes.body.plan.id}`]);
+    expect((await owner("GET", `/planning/plans?category=${encodeURIComponent("Corporate gift boxes")}`)).body.items.map((p: any) => p.name)).toEqual(["Corporate gift boxes Q1"]);
+  });
+
+  it("confirmed suggestions are grouped under their occasion with a task due date, a manual prep date, or 'Prep date needed'", async () => {
+    await scan("POST", "/review-intake/batches", batch([msg({ title: "Valentine's gift box photos", excerpt: "Synthetic: we need Valentine's gift box photos" }),
+      msg({ title: "Valentine's email subject lines", excerpt: "Synthetic: Valentine's email subject lines please" })]));
+    const a = await sug("Valentine's gift box photos"), b = await sug("Valentine's email subject lines");
+    for (const x of [a, b]) await owner("POST", `/review/suggestions/${x.id}/classify`, { version: (await cur(x.id)).version, occasion: { id: "valentines-day", year: 2027 } });
+    let e = entry((await owner("GET", "/planning/timeline")).body, "gift:valentines-day:2027");
+    expect(e.suggestions.map((x: any) => [x.title, x.prep])).toEqual([["Valentine's gift box photos", null], ["Valentine's email subject lines", null]]);   // Prep date needed
+    await owner("POST", `/review/suggestions/${a.id}/classify`, { version: (await cur(a.id)).version, prep_date: "2026-12-15" });
+    await fill(b.id, { due_date: "2027-01-20" });
+    e = entry((await owner("GET", "/planning/timeline")).body, "gift:valentines-day:2027");
+    expect(e.suggestions.find((x: any) => x.id === a.id).prep).toEqual({ date: "2026-12-15", kind: "manual" });
+    expect(e.suggestions.find((x: any) => x.id === b.id).prep).toEqual({ date: "2027-01-20", kind: "task_due" });
+    expect(e).toMatchObject({ start_now: true, earliest_prep: "2026-12-15" });
+    // Resolved or dismissed suggestions leave the timeline.
+    await owner("POST", `/review/suggestions/${a.id}/resolve`, { version: (await cur(a.id)).version });
+    e = entry((await owner("GET", "/planning/timeline")).body, "gift:valentines-day:2027");
+    expect(e.suggestions.map((x: any) => x.id)).toEqual([b.id]);
+  });
+
+  it("a management account sees the public occasion and published plans only: no drafts, suggestions or their counts", async () => {
+    const tl = (await req("manager@example.test", "GET", "/planning/timeline")).body;
+    expect(tl.owner).toBe(false);
+    const val = entry(tl, "gift:valentines-day:2027");
+    expect(val).toMatchObject({ occasion: { name: "Valentine’s Day" }, plans: [], suggestions: [] });
+    const text = JSON.stringify(tl);
+    expect(text).not.toMatch(/Synthetic Valentine draft|gift box photos|subject lines|"status":"draft"|Slack/);
+    expect(text).toContain("Corporate gift boxes Q1");                                                   // published, prep within three months
+    expect(JSON.stringify((await req("manager@example.test", "GET", "/planning/categories")).body)).not.toMatch(/Synthetic/);
+    expect((await req("manager@example.test", "GET", "/review/suggestions?occasion=unclassified")).status).toBe(404);
+  });
+
+  it("Add to plan offers plans for the same occasion first and flags a plan for a different occasion", async () => {
+    const b = await sug("Valentine's email subject lines");
+    await owner("POST", "/planning/plans", { business_id: "sb", name: "Synthetic Christmas draft", gift_occasion_id: "christmas", occurrence_year: 2026, prep_start: "2026-11-20", campaign_start: "2026-12-01", campaign_end: "2026-12-24" });
+    const c = (await owner("GET", `/review/suggestions/${b.id}/plans`)).body;
+    expect(c.occasion).toMatchObject({ id: "valentines-day", year: 2027 });
+    expect(c.plans[0]).toMatchObject({ name: "Synthetic Valentine draft", match: "same" });
+    expect(c.plans.find((p: any) => p.name === "Synthetic Christmas draft")).toMatchObject({ match: "different", occasion: { id: "christmas", year: 2026 } });
+  });
+});
+
+describe("in-place status actions", () => {
+  const cur = async (id: string) => (await owner("GET", `/review/suggestions/${id}`)).body.suggestion;
+  it("Resolve: handled with no task; leaves To review and updates the count at once; rescans never bring it back", async () => {
+    const m1 = msg({ title: "Check the gift-card balance report" });
+    await scan("POST", "/review-intake/batches", batch([m1]));
+    const s = (await first()).find((i: any) => i.fields.title === "Check the gift-card balance report");
+    const before = (await owner("GET", "/review/summary")).body.pending;
+    const r = await owner("POST", `/review/suggestions/${s.id}/resolve`, { version: s.version });
+    expect(r.body.suggestion).toMatchObject({ status: "resolved" });
+    expect((await owner("GET", "/review/summary")).body.pending).toBe(before - 1);
+    expect((await owner("GET", "/review/suggestions?status=pending")).body.items.map((i: any) => i.id)).not.toContain(s.id);
+    expect((await owner("GET", "/review/suggestions?status=resolved")).body.items.map((i: any) => i.id)).toContain(s.id);
+    expect((await scan("POST", "/review-intake/batches", batch([m1]))).body).toMatchObject({ created_count: 0, unchanged_count: 1 });
+    expect((await cur(s.id)).status).toBe("resolved");
+    expect((await owner("POST", `/review/suggestions/${s.id}/create`, { version: (await cur(s.id)).version })).status).toBe(409);
+    expect(tracker.creates).toBe(0);
+  });
+
+  it("Resolve racing with task creation: a send in progress blocks it; a task created behind a lost answer is linked instead", async () => {
+    await scan("POST", "/review-intake/batches", batch([msg({ title: "Reorder the gift tags" })]));
+    const s = (await first()).find((i: any) => i.fields.title === "Reorder the gift tags");
+    const v = (await fill(s.id)).body.suggestion.version;
+    const c = await (await import("../server/db")).getPool().connect();
+    await c.query("select pg_advisory_lock(hashtextextended($1, 13))", [s.id]);
+    try { expect((await owner("POST", `/review/suggestions/${s.id}/resolve`, { version: v })).body.error.code).toBe("sending"); }
+    finally { await c.query("select pg_advisory_unlock(hashtextextended($1, 13))", [s.id]); c.release(); }
+    tracker.dropAfterCreate = 1;
+    const lost = await owner("POST", `/review/suggestions/${s.id}/create`, { version: v });
+    expect(lost.body.suggestion.delivery.status).toBe("unknown");
+    const r = await owner("POST", `/review/suggestions/${s.id}/resolve`, { version: lost.body.suggestion.version });
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe("task_exists");
+    expect((await cur(s.id))).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { open_url: expect.stringContaining("/#/tasks/") } });
+    expect(tracker.creates).toBe(1);
+  });
+
+  it("Add to task: one task, visible to its assignee in Marketing Tasks with the occasion; a retry or double click links the same record", async () => {
+    await scan("POST", "/review-intake/batches", batch([msg({ title: "Mother's Day gift guide copy", excerpt: "Synthetic: Mother's Day gift guide copy" })]));
+    const s = (await first()).find((i: any) => i.fields.title === "Mother's Day gift guide copy");
+    await owner("POST", `/review/suggestions/${s.id}/classify`, { version: s.version, occasion: { id: "mothers-day", year: 2027 } });
+    const ed = await fill(s.id, { brief: "Three short paragraphs.", due_date: "2027-03-15" });
+    const v = ed.body.suggestion.version;
+    tracker.dropAfterCreate = 1;
+    const [x, y] = await Promise.all([owner("POST", `/review/suggestions/${s.id}/create`, { version: v }), owner("POST", `/review/suggestions/${s.id}/create`, { version: v })]);
+    expect([x.status, y.status]).toContain(200);
+    const now = await cur(s.id);
+    const retry = await owner("POST", `/review/suggestions/${s.id}/create`, { version: now.version });
+    expect(retry.body).toMatchObject({ outcome: "created" });
+    expect(tracker.creates).toBe(1);
+    expect(retry.body.suggestion).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { open_url: expect.stringContaining("/#/tasks/") } });
+    expect(JSON.stringify(tracker.bodies)).not.toMatch(/Synthetic|slack/i);
+    const t = [...tracker.tasks.values()][0];
+    await q(`insert into tracker_task_records (source_instance, record_id, task_id, kind, business_id, title, task_type, brand_name, assignee_name, status, due_date, created_on, source_updated_at, snapshot_id)
+             values ('tracker-test', $1, $2, 'task', 'sb', $3, 'adhoc', 'Succulents Box', 'Thao', 'open', '2027-03-15', '2026-11-18', now(), 'snp_${"0".repeat(32)}')`, [`task:${t.task_id}`, t.task_id, t.title]);
+    const tasks = (await req("manager@example.test", "GET", "/tasks?view=all&business=sb&from=2027-03-01&to=2027-03-31")).body.items;
+    expect(tasks.filter((i: any) => i.title === "Mother's Day gift guide copy")).toEqual([expect.objectContaining({ owner: "Thao", occasion: "Mother’s Day 2027" })]);
+    // The confirmed occasion shows the task's due date on Emilie's timeline.
+    _setPlanningClockForTests(() => new Date("2026-11-18T03:00:00Z"));
+    try {
+      const e = (await owner("GET", "/planning/timeline")).body.entries.find((x: any) => x.key === "gift:mothers-day:2027");
+      expect(e.suggestions).toEqual([expect.objectContaining({ id: s.id, task: true, prep: { date: "2027-03-15", kind: "task_due" } })]);
+    } finally { _setPlanningClockForTests(null); }
   });
 });

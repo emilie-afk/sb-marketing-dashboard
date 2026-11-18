@@ -14,12 +14,14 @@ const people: Record<string, { name: string; brands: string[] }> = { [STAFF]: { 
 // ------------------------------------------------------------ fake Corporate Gifts (tasks + receipts)
 type CgT = { id: string; title: string; brief: string | null; owner_hint: string | null; due_date: string | null; slack_status: string; content_version: number;
   delivery_status: string; delivered_version: number | null; tracker_task_id: string | null; partners: { name: string; url: string }[] };
-const cg = { tasks: new Map<string, CgT>(), receipts: [] as any[], failReceipts: 0, reset() { this.tasks.clear(); this.receipts = []; this.failReceipts = 0; } };
+// caps: whether this Corporate Gifts accepts the shared "resolved" status (its migration 008); without it a "resolved"
+// receipt is refused, as the previous Corporate Gifts build does.
+const cg = { tasks: new Map<string, CgT>(), receipts: [] as any[], failReceipts: 0, caps: true, reset() { this.tasks.clear(); this.receipts = []; this.failReceipts = 0; this.caps = true; } };
 function applyReceipt(r: any) {
   const t = cg.tasks.get(r.id);
   if (!t) return;
   if (r.state === "delivered") { t.delivery_status = "delivered"; t.tracker_task_id = r.tracker.task_id; t.delivered_version = Math.max(t.delivered_version ?? 0, r.content_version); return; }
-  if (["delivered", "dismissed"].includes(t.delivery_status)) return;
+  if (["delivered", "dismissed", "resolved"].includes(t.delivery_status)) return;
   if (r.state === "in_review" && t.delivery_status !== "pending") return;
   t.delivery_status = r.state;
 }
@@ -36,11 +38,13 @@ async function fakeFetch(url: string, init: any): Promise<Response> {
     if (init?.headers?.authorization !== `Bearer ${"r".repeat(40)}`) return res(401, { error: { code: "unauthorized" } });
     if (u.pathname === "/api/reporting/v1/corporate-tasks") {
       const tasks = [...cg.tasks.values()].filter((t) => ["pending", "in_review", "failed"].includes(t.delivery_status) || (t.delivery_status === "delivered" && t.content_version > (t.delivered_version ?? 0)) || u.searchParams.has("since"));
-      return res(200, { ok: true, schema_version: 1, source: "sb-corporate-gifts", id: "cg:corporate-tasks", as_of: new Date().toISOString(), tasks: [...tasks, { id: "not-a-task" }] });
+      return res(200, { ok: true, schema_version: 1, source: "sb-corporate-gifts", id: "cg:corporate-tasks", as_of: new Date().toISOString(), tasks: [...tasks, { id: "not-a-task" }],
+        ...(cg.caps ? { capabilities: ["resolved"] } : {}) });
     }
     if (u.pathname === "/api/reporting/v1/corporate-task-receipts" && init.method === "POST") {
       if (cg.failReceipts > 0) { cg.failReceipts--; return res(503, { error: { code: "down" } }); }
       const b = JSON.parse(init.body);
+      if (!cg.caps && b.receipts.some((r: any) => r.state === "resolved")) return res(400, { error: { code: "payload_rejected" } });
       cg.receipts.push(...b.receipts);
       for (const r of b.receipts) applyReceipt(r);
       return res(200, { ok: true, applied: b.receipts.length });
@@ -236,5 +240,140 @@ describe("Corporate Gifts task queue", () => {
     expect(r.body.items.find((i: any) => i.title === "Other tracker task").category ?? null).toBeNull();
     const legacy = await req("manager@example.test", "GET", "/tasks?from=2026-12-01&to=2026-12-31");
     expect(legacy.body.items.find((i: any) => i.id === `tracker:tracker-test:task:${tid}`)).toMatchObject({ category: "Corporate Gifts" });
+  });
+});
+
+describe("in-place status actions", () => {
+  it("Resolve: handled with no task; leaves To review and the count at once; Corporate Gifts hears no task will be made; a later read never reopens it", async () => {
+    tracker.reset();
+    const a = cgTask({ title: "Confirm Demo Market India's spring sizes" });
+    await owner("POST", "/review/corporate/refresh", {});
+    const before = (await owner("GET", "/review/corporate/summary")).body.pending;
+    const ia = await item(a.id);
+    const r = await owner("POST", `/review/corporate/${a.id}/resolve`, { version: ia.version });
+    expect(r.status).toBe(200);
+    expect(r.body.draft).toMatchObject({ status: "resolved" });
+    expect((await owner("GET", "/review/corporate/summary")).body.pending).toBe(before - 1);
+    expect((await list("pending")).map((i) => i.id)).not.toContain(a.id);
+    expect((await list("resolved")).map((i) => i.id)).toContain(a.id);
+    expect(cg.tasks.get(a.id)!.delivery_status).toBe("resolved");
+    expect(cg.receipts.filter((x) => x.id === a.id).at(-1)).toMatchObject({ state: "resolved" });
+    // Recorded as reported (not sent again on every sync).
+    expect((await q("select receipt_due, receipt_state from corporate_task_drafts where id = $1", [a.id]))[0]).toEqual({ receipt_due: false, receipt_state: "resolved" });
+    expect((await owner("POST", `/review/corporate/${a.id}/resolve`, { version: r.body.draft.version })).status).toBe(409);
+    a.content_version = 2; a.title = "Confirm Demo Market India's spring sizes (updated)";
+    await syncCorporateTasks();
+    expect((await item(a.id)).status).toBe("resolved");
+    expect((await owner("POST", "/review/corporate/send", { ids: [a.id] })).body.results[0]).toMatchObject({ outcome: "skipped" });
+    expect(tracker.creates).toBe(0);
+    expect((await req("manager@example.test", "POST", `/review/corporate/${a.id}/resolve`, { version: 1 })).status).toBe(404);
+  });
+
+  it("Add to task: confirm the fields, send once; a double click or a retry links the same task", async () => {
+    tracker.reset();
+    const a = cgTask({ title: "Send Demo Market Juliet the order form" });
+    await owner("POST", "/review/corporate/refresh", {});
+    const ia = await item(a.id);
+    const ed = await owner("PATCH", `/review/corporate/${a.id}`, { version: ia.version, title: "Send Demo Market Juliet the order form", brief: "Use the 2027 form.", tracker_assignee_id: LAN, due_date: "2026-12-09" });
+    expect(ed.status).toBe(200);
+    const [x, y] = await Promise.all([owner("POST", "/review/corporate/send", { ids: [a.id] }), owner("POST", "/review/corporate/send", { ids: [a.id] })]);
+    expect([x.body.results[0].outcome, y.body.results[0].outcome].sort()).toEqual(expect.arrayContaining(["created"]));
+    expect(tracker.creates).toBe(1);
+    const again = await owner("POST", "/review/corporate/send", { ids: [a.id] });
+    expect(again.body.results[0]).toMatchObject({ outcome: "created", existing: true });
+    expect(tracker.creates).toBe(1);
+    const d = (await owner("GET", `/review/corporate/${a.id}`)).body.draft;
+    expect(d).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { open_url: expect.stringContaining("/#/tasks/") } });
+    expect(tracker.bodies[0]).toMatchObject({ assignee_id: LAN, due_date: "2026-12-09", title: "Send Demo Market Juliet the order form" });
+  });
+});
+
+describe("Resolved, shared with Corporate Gifts", () => {
+  const stateOf = async (id: string) => (await owner("GET", `/review/corporate/${id}`)).body.draft;
+  it("resolved in Corporate Gifts: closed here after the next read, the count drops, no task; a later send or rescan never reopens it", async () => {
+    tracker.reset();
+    const a = cgTask({ title: "Answer Demo Market Kilo's packaging question" });
+    await syncCorporateTasks();
+    const before = (await owner("GET", "/review/corporate/summary")).body.pending;
+    a.delivery_status = "resolved";                                         // Resolve clicked in Corporate Gifts
+    await syncCorporateTasks();
+    expect(await stateOf(a.id)).toMatchObject({ status: "resolved", resolved_in: "corporate_gifts", cg_state: "resolved" });
+    expect((await owner("GET", "/review/corporate/summary")).body.pending).toBe(before - 1);
+    expect((await owner("POST", "/review/corporate/send", { ids: [a.id] })).body.results[0]).toMatchObject({ outcome: "skipped" });
+    a.content_version = 2; await syncCorporateTasks();
+    expect((await stateOf(a.id)).status).toBe("resolved");
+    expect(cg.receipts.filter((x) => x.id === a.id && x.state !== "in_review")).toEqual([]);   // nothing to report back: it was resolved there
+    expect(tracker.creates).toBe(0);
+  });
+
+  it("before Corporate Gifts accepts 'resolved', a resolution here is held back (never sent as another state), then reported", async () => {
+    tracker.reset();
+    cg.caps = false;
+    try {
+      const a = cgTask({ title: "Check Demo Market Lima's invoice format" });
+      await syncCorporateTasks();
+      const d = await stateOf(a.id);
+      expect((await owner("POST", `/review/corporate/${a.id}/resolve`, { version: d.version })).body.draft.status).toBe("resolved");
+      await syncCorporateTasks();
+      expect(cg.tasks.get(a.id)!.delivery_status).toBe("in_review");
+      expect(cg.receipts.filter((x) => x.id === a.id && x.state !== "in_review")).toEqual([]);
+      cg.caps = true;
+      await syncCorporateTasks();
+      expect(cg.tasks.get(a.id)!.delivery_status).toBe("resolved");
+    } finally { cg.caps = true; }
+  });
+
+  it("a stale update is refused, and a stale receipt never reopens a resolved request", async () => {
+    tracker.reset();
+    const a = cgTask({ title: "Send Demo Market Mike the size chart" });
+    await syncCorporateTasks();
+    const d = await stateOf(a.id);
+    await owner("PATCH", `/review/corporate/${a.id}`, { version: d.version, title: "Send Demo Market Mike the size chart (v2)", brief: null, tracker_assignee_id: LAN, due_date: "2026-12-11" });
+    expect((await owner("POST", `/review/corporate/${a.id}/resolve`, { version: d.version })).status).toBe(409);   // opened before the edit
+    const cur = await stateOf(a.id);
+    expect((await owner("POST", `/review/corporate/${a.id}/resolve`, { version: cur.version })).status).toBe(200);
+    applyReceipt({ id: a.id, content_version: 1, state: "in_review" });
+    applyReceipt({ id: a.id, content_version: 1, state: "failed" });
+    expect(cg.tasks.get(a.id)!.delivery_status).toBe("resolved");
+    expect((await stateOf(a.id)).status).toBe("resolved");
+  });
+
+  it("racing with task creation: a send in progress blocks Resolve; an existing task wins and is linked; an unsettled send is refused", async () => {
+    tracker.reset();
+    const a = cgTask({ title: "Ship Demo Market November samples" });
+    await syncCorporateTasks();
+    let d = await stateOf(a.id);
+    d = (await owner("PATCH", `/review/corporate/${a.id}`, { version: d.version, title: d.fields.title, brief: null, tracker_assignee_id: LAN, due_date: "2026-12-12" })).body.draft;
+    // 1. A send holds the draft's lock: Resolve waits for it.
+    const c = await (await import("../server/db")).getPool().connect();
+    await c.query("select pg_advisory_lock(hashtextextended($1, 17))", [a.id]);
+    try { expect((await owner("POST", `/review/corporate/${a.id}/resolve`, { version: d.version })).body.error.code).toBe("sending"); }
+    finally { await c.query("select pg_advisory_unlock(hashtextextended($1, 17))", [a.id]); c.release(); }
+    // 2. The task was created but the answer was lost: Resolve checks Task Tracker first and links the task instead.
+    await owner("POST", "/review/corporate/send", { ids: [a.id] });
+    expect(tracker.creates).toBe(1);
+    await q(`update corporate_task_drafts set delivery_status = 'unknown', tracker_task_id = null, tracker_status = null where id = $1`, [a.id]);
+    d = await stateOf(a.id);
+    const r = await owner("POST", `/review/corporate/${a.id}/resolve`, { version: d.version });
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe("task_exists");
+    expect(await stateOf(a.id)).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { status: "open", open_url: expect.stringContaining("/#/tasks/") } });
+    // 3. Resolved in Corporate Gifts while the task was being created: the task wins, and Corporate Gifts is told it was delivered.
+    a.delivery_status = "resolved";
+    await syncCorporateTasks();
+    expect(cg.tasks.get(a.id)!.delivery_status).toBe("delivered");
+    expect((await stateOf(a.id)).status).toBe("approved");
+    expect(tracker.creates).toBe(1);
+    // 4. No answer and no task in Task Tracker yet: Resolve is refused (that send could still arrive).
+    const b = cgTask({ title: "Ask Demo Market November about labels" });
+    await syncCorporateTasks();
+    await q(`update corporate_task_drafts set status = 'approved', delivery_status = 'unknown', tracker_assignee_id = $2, due_date = '2026-12-12' where id = $1`, [b.id, LAN]);
+    const rb = await owner("POST", `/review/corporate/${b.id}/resolve`, { version: (await stateOf(b.id)).version });
+    expect(rb.body.error.code).toBe("delivery_unsettled");
+    // ...and a Corporate Gifts resolution waits for Task Tracker too: the draft stays as it is.
+    cg.tasks.get(b.id)!.delivery_status = "resolved";
+    await syncCorporateTasks();
+    expect((await stateOf(b.id)).status).toBe("approved");
+    expect(tracker.creates).toBe(1);
   });
 });
