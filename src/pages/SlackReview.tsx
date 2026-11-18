@@ -31,7 +31,12 @@ function Queue() {
   const patch = (it: any, text?: string) => { setPatched((p) => ({ ...p, [it.id]: it })); if (text) setMsg({ id: it.id, text }); changed(); };
   const act = async (it: any, fn: () => Promise<any>, text?: string) => {
     setBusy(it.id); setMsg(null);
-    try { const r = await fn(); if (r?.suggestion) patch(r.suggestion, text); } catch (e: any) { setMsg({ id: it.id, text: e.message }); } finally { setBusy(null); }
+    try { const r = await fn(); if (r?.suggestion) patch(r.suggestion, text); }
+    catch (e: any) {
+      // Refused (e.g. a task already exists in Task Tracker): show the row as it is now, with the reason.
+      if (e.status === 409) { try { patch((await api<any>(`/review/suggestions/${it.id}`)).suggestion); } catch { /* keep the old row */ } }
+      setMsg({ id: it.id, text: e.message });
+    } finally { setBusy(null); }
   };
   const setFilter = (next: Record<string, string | null>) => { setPatched({}); setMsg(null); setQ(next); };
   const classify = async (it: any, body: any) => {
@@ -66,7 +71,8 @@ function Queue() {
               { label: "Add to task", hint: "Confirm the fields, send to Task Tracker", onClick: () => setTaskFor(it) },
               { label: "Add to plan", hint: "Into a private draft plan", onClick: () => setPlanFor(it) },
             ]} /></td>
-            <td><DeliveryCell it={it} busy={busy === it.id} onRetry={() => act(it, () => api(`/review/suggestions/${it.id}/create`, { method: "POST", json: { version: it.version } }), "Checked with Task Tracker.")} /></td>
+            <td><DeliveryCell it={it} busy={busy === it.id} onRetry={() => act(it, () => api(`/review/suggestions/${it.id}/create`, { method: "POST", json: { version: it.version } }), "Checked with Task Tracker.")}
+              onResolve={() => act(it, () => api(`/review/suggestions/${it.id}/resolve`, { method: "POST", json: { version: it.version } }), "Resolved.")} /></td>
           </tr>; })}</tbody></table></div>}</Async>
     {picker && <OccasionPicker title={picker.fields.title} business={picker.fields.business_id ?? picker.suggested.business} current={picker.occasion.current} prepDate={picker.occasion.prep_date}
       busy={busy === picker.id} error={pickErr} onClose={() => setPicker(null)}
@@ -83,14 +89,15 @@ function ReviewStatus({ it, busy, actions }: { it: any; busy: boolean; actions: 
 }
 
 /** Task Tracker state on the row: Sending / Sent (with the link) / Needs retry. */
-function DeliveryCell({ it, busy, onRetry }: { it: any; busy: boolean; onRetry: () => void }) {
+function DeliveryCell({ it, busy, onRetry, onResolve }: { it: any; busy: boolean; onRetry: () => void; onResolve: () => void }) {
   if (it.status === "planned") return <span className="sub">{it.plan?.name ? <>Plan: <a href={`#/planning/${it.plan.id}`}>{it.plan.name}</a></> : "Removed from its plan"}</span>;
   if (it.status !== "approved") return <span className="sub">—</span>;
   const d = it.delivery.status;
   return <>
     <span className={`chip ${["failed", "unknown"].includes(d) ? "bad" : d === "sending" ? "warn" : ""}`}>{DELIVERY[d]}</span>
     {it.task?.open_url && <div><a href={it.task.open_url} target="_blank" rel="noopener noreferrer">Open in Task Tracker</a></div>}
-    {["failed", "unknown", "sending"].includes(d) && <div><button className="btn small" disabled={busy} onClick={onRetry}>Retry</button></div>}
+    {["failed", "unknown", "sending"].includes(d) && <div className="row" style={{ gap: 4 }}><button className="btn small" disabled={busy} onClick={onRetry}>Retry</button>
+      <button className="btn small" disabled={busy} onClick={onResolve} title="Handled without a task (Task Tracker is checked first)">Resolve</button></div>}
     {it.delivery.error && ["failed", "unknown"].includes(d) && <div className="sub bad">{it.delivery.error}</div>}
   </>;
 }

@@ -518,6 +518,24 @@ describe("in-place status actions", () => {
     expect(tracker.creates).toBe(0);
   });
 
+  it("Resolve racing with task creation: a send in progress blocks it; a task created behind a lost answer is linked instead", async () => {
+    await scan("POST", "/review-intake/batches", batch([msg({ title: "Reorder the gift tags" })]));
+    const s = (await first()).find((i: any) => i.fields.title === "Reorder the gift tags");
+    const v = (await fill(s.id)).body.suggestion.version;
+    const c = await (await import("../server/db")).getPool().connect();
+    await c.query("select pg_advisory_lock(hashtextextended($1, 13))", [s.id]);
+    try { expect((await owner("POST", `/review/suggestions/${s.id}/resolve`, { version: v })).body.error.code).toBe("sending"); }
+    finally { await c.query("select pg_advisory_unlock(hashtextextended($1, 13))", [s.id]); c.release(); }
+    tracker.dropAfterCreate = 1;
+    const lost = await owner("POST", `/review/suggestions/${s.id}/create`, { version: v });
+    expect(lost.body.suggestion.delivery.status).toBe("unknown");
+    const r = await owner("POST", `/review/suggestions/${s.id}/resolve`, { version: lost.body.suggestion.version });
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe("task_exists");
+    expect((await cur(s.id))).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { open_url: expect.stringContaining("/#/tasks/") } });
+    expect(tracker.creates).toBe(1);
+  });
+
   it("Add to task: one task, visible to its assignee in Marketing Tasks with the occasion; a retry or double click links the same record", async () => {
     await scan("POST", "/review-intake/batches", batch([msg({ title: "Mother's Day gift guide copy", excerpt: "Synthetic: Mother's Day gift guide copy" })]));
     const s = (await first()).find((i: any) => i.fields.title === "Mother's Day gift guide copy");

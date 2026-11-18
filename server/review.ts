@@ -364,18 +364,37 @@ export async function dismissSuggestion(s: Session, id: string, version: number)
 
 const RESOLVED_MSG = "This suggestion was resolved (handled without a task).";
 
-/** Resolve: handled, no task. Leaves "To review"; later scans never bring it back. Nothing is sent anywhere. */
+/**
+ * Resolve: handled, no task. Leaves "To review"; later scans never bring it back. Nothing is sent anywhere. Holds the
+ * same per-suggestion lock as Create task, so the two never interleave; if a task exists or may exist, Task Tracker is
+ * checked first and an existing task wins (its status and link are shown; completion belongs to it).
+ */
 export async function resolveSuggestion(s: Session, id: string, version: number) {
   assertReviewer(s);
-  await tx(async (c) => {
-    const cur = await row(id, c, true);
-    if (!cur) throw notFound("Suggestion");
-    if (cur.version !== version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload first.");
-    if (cur.status === "planned") throw new HttpError(409, "planned", PLANNED_MSG);
-    if (!["pending", "approved"].includes(cur.status) || !["not_sent", "failed"].includes(cur.delivery_status))
-      throw new HttpError(409, "not_open", cur.status === "resolved" ? "Already resolved." : "Only a suggestion still to review (or one whose task was never created) can be resolved.");
-    await c.query("update review_suggestions set status = 'resolved', reviewed_at = now(), updated_at = now(), version = version + 1 where id = $1", [id]);
-  });
+  if (!/^[0-9a-f-]{36}$/.test(id)) throw notFound("Suggestion");
+  const lockConn = await getPool().connect();
+  const lock = (await lockConn.query("select pg_try_advisory_lock(hashtextextended($1, 13)) ok", [id])).rows[0];
+  if (!lock?.ok) { lockConn.release(); throw new HttpError(409, "sending", "This task is being created right now. Wait for the result, then decide."); }
+  try {
+    const pre = await one<any>("select version, delivery_status from review_suggestions where id = $1", [id]);
+    if (!pre) throw notFound("Suggestion");
+    if (pre.version !== version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload first.");
+    if (["sending", "unknown", "created"].includes(pre.delivery_status) && planningTrackerConfigured())
+      await reconcile("review_suggestions", [{ id, delivery_status: pre.delivery_status === "created" ? "created" : "unknown" }]).catch(() => {});
+    await tx(async (c) => {
+      const cur = await row(id, c, true);
+      if (cur.status === "planned") throw new HttpError(409, "planned", PLANNED_MSG);
+      if (cur.delivery_status === "created") throw new HttpError(409, "task_exists", `This suggestion is already a Task Tracker task (${cur.tracker_status ?? "open"}). Complete or close it there.`);
+      if (["sending", "unknown"].includes(cur.delivery_status))
+        throw new HttpError(409, "delivery_unsettled", "Its last send got no answer and Task Tracker has no task for it yet, so that send could still arrive. Retry settles it (never a second task).");
+      if (!["pending", "approved"].includes(cur.status))
+        throw new HttpError(409, "not_open", cur.status === "resolved" ? "Already resolved." : "Only a suggestion still to review (or one whose task was never created) can be resolved.");
+      await c.query("update review_suggestions set status = 'resolved', reviewed_at = now(), updated_at = now(), version = version + 1 where id = $1", [id]);
+    });
+  } finally {
+    await lockConn.query("select pg_advisory_unlock(hashtextextended($1, 13))", [id]).catch(() => {});
+    lockConn.release();
+  }
   return getSuggestion(s, id);
 }
 

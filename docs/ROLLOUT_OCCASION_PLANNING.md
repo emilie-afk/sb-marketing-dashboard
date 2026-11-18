@@ -10,11 +10,41 @@ Branch `feature/occasion-planning`. One migration, no new settings, no change ne
   with **Start preparing now**; plans can have **product categories** (column, filter, form), so a category-only plan
   works without an occasion.
 - **Slack Review** and **Corporate Gifts**: the **To review** badge is a button with **Resolve**, **Dismiss**, **Add to
-  task** (and **Add to plan** in Slack Review), all in place. New status **Resolved** (handled, no task).
+  task** (and **Add to plan** in Slack Review), all in place. New status **Resolved** (handled, no task), shared with
+  the Corporate Gifts app for its requests.
 - **Slack Review occasions**: occasion suggested at intake, **Occasion** column with Confirm / Change / Set occasion,
   **Unclassified** filter, confirmed suggestions on the owner's timeline, Add to plan prefers plans for the same
   occasion. Tasks show their occasion in Marketing Tasks.
 - New occasions **Black Friday** and **Cyber Monday**; occasion aliases (e.g. BF/CM, Xmas).
+
+## Shared "Resolved" with Corporate Gifts (before merging #20)
+
+Resolved is one status in both apps, on the same Corporate Gifts request id. The Corporate Gifts side is a separate
+change (`sb-corporate-gifts`, branch `feature/shared-resolved`: migration 008, feed capability, `resolved` receipts,
+Resolve in its Tasks view; its `docs/SHARED_RESOLVED.md`).
+
+Deployment order, so neither app sends `resolved` before the other can read it:
+
+1. **Dashboard first** (this branch, migration 015). It reads `resolved` in the Corporate Gifts feed and closes those
+   drafts, but holds its own `resolved` receipts until the feed advertises `capabilities: ["resolved"]`. Drafts
+   resolved here in the meantime stay "In review" in Corporate Gifts.
+2. **Corporate Gifts second**: apply its migration 008, then deploy. Its feed then advertises the capability; the
+   dashboard's next sync (hourly, or Refresh) sends the held resolutions.
+
+(Corporate Gifts first is also safe: the current dashboard build skips feed rows with a status it does not know and
+never reopens them; they close here once this branch is deployed.)
+
+Verify after both are live:
+
+- Resolve one request in Corporate Gifts and another in the dashboard. After a dashboard Refresh, both show Resolved in
+  both apps (the dashboard shows "Resolved in Corporate Gifts" for the first), both To review counts drop by two, and
+  no Task Tracker task exists for either.
+- Stale update: resolving from a form opened before the other app resolved it is refused (version check).
+- Race: a request whose task is being created can't be resolved until the send settles; if the task exists, both apps
+  show it as in Task Tracker with its link.
+
+Rollback order is the reverse: Corporate Gifts first (its rollback turns resolved requests into dismissed ones), then
+the dashboard.
 
 ## Order
 
@@ -46,8 +76,8 @@ already in Task Tracker stay there.
 
 ## Decisions to know
 
-- Corporate Gifts has no "resolved" receipt state, so a resolved draft is reported as `dismissed` (no task will be
-  created).
+- Resolved is shared with Corporate Gifts (see above); a task that already exists in Task Tracker always wins over a
+  resolution, and completion belongs to that task.
 - "BF/CM", "BFCM" and "Black Friday Cyber Monday" map to Black Friday; a message naming both Black Friday and Cyber
   Monday separately lists both for the owner to choose.
 - A suggested prep start is seven weeks before the occasion (the plan form's default). Occasions with unconfirmed

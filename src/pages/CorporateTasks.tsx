@@ -29,7 +29,12 @@ export function CorporateTasks() {
   const patch = (d: any, text?: string) => { setPatched((p) => ({ ...p, [d.id]: d })); if (text) setRowMsg({ id: d.id, text }); window.dispatchEvent(new Event("corporate-tasks-changed")); };
   const rowAct = async (it: any, fn: () => Promise<any>, text: string) => {
     setRowBusy(it.id); setRowMsg(null);
-    try { patch((await fn()).draft, text); } catch (e: any) { setRowMsg({ id: it.id, text: e.message }); } finally { setRowBusy(null); }
+    try { patch((await fn()).draft, text); }
+    catch (e: any) {
+      // Refused (e.g. the task already exists in Task Tracker): show the row as it is now (status and link), with the reason.
+      if (e.status === 409) { try { patch((await api<any>(`/review/corporate/${it.id}`)).draft); } catch { /* keep the old row */ } }
+      setRowMsg({ id: it.id, text: e.message });
+    } finally { setRowBusy(null); }
   };
   const people = useMemo(() => {
     const d = dir.data;
@@ -92,12 +97,13 @@ export function CorporateTasks() {
                 { label: "Resolve", hint: "Handled; no task", onClick: () => rowAct(it, () => api(`/review/corporate/${it.id}/resolve`, { method: "POST", json: { version: it.version } }), "Resolved.") },
                 { label: "Dismiss", hint: "No action needed", onClick: () => rowAct(it, () => api(`/review/corporate/${it.id}/dismiss`, { method: "POST", json: { version: it.version } }), "Dismissed.") },
                 { label: "Add to task", hint: "Confirm the fields, send to Task Tracker", onClick: () => setAddTask(it) },
-              ]} /> : <span className={`chip ${["dismissed", "resolved"].includes(it.status) ? "muted" : ""}`}>{STATUS[it.status]}</span>}
+              ]} /> : <span className={`chip ${["dismissed", "resolved"].includes(it.status) ? "muted" : ""}`}>{STATUS[it.status]}{it.resolved_in === "corporate_gifts" ? " in Corporate Gifts" : ""}</span>}
+              {it.cg_state === "resolved" && it.status !== "resolved" && <div className="sub">{it.task ? "Resolved in Corporate Gifts, but this task was already in Task Tracker: complete it there." : "Resolved in Corporate Gifts: closes here once Task Tracker confirms no task."}</div>}
               {!["pending", "dismissed", "resolved"].includes(it.status) && <> <span className={`chip ${["failed", "unknown"].includes(it.delivery.status) ? "bad" : it.delivery.status === "sending" ? "warn" : ""}`}>{DELIVERY[it.delivery.status]}</span></>}
               {it.task && <> <span className="chip muted">{TASK[it.task.status] ?? it.task.status}</span></>}</td>
             <td>{it.task?.open_url ? <a href={it.task.open_url} target="_blank" rel="noopener noreferrer">Open in Task Tracker</a>
-              : it.status === "approved" && ["failed", "unknown", "sending"].includes(it.delivery.status) ? <button className="btn small" disabled={rowBusy === it.id} onClick={() => rowAct(it, async () => {
-                  await api("/review/corporate/send", { method: "POST", json: { ids: [it.id] } }); return api(`/review/corporate/${it.id}`); }, "Checked with Task Tracker.")}>Retry</button>
+              : it.status === "approved" && ["failed", "unknown", "sending"].includes(it.delivery.status) ? <><button className="btn small" disabled={rowBusy === it.id} onClick={() => rowAct(it, async () => {
+                  await api("/review/corporate/send", { method: "POST", json: { ids: [it.id] } }); return api(`/review/corporate/${it.id}`); }, "Checked with Task Tracker.")}>Retry</button> <button className="btn small" disabled={rowBusy === it.id} title="Handled without a task (Task Tracker is checked first)" onClick={() => rowAct(it, () => api(`/review/corporate/${it.id}/resolve`, { method: "POST", json: { version: it.version } }), "Resolved.")}>Resolve</button></>
               : can && !["dismissed", "resolved"].includes(it.status) && <button className="btn small" onClick={() => setEdit(it)}>Edit</button>}</td>
           </tr>;
         })}</tbody></table></div>}</Async>

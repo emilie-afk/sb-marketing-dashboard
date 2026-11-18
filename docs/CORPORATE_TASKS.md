@@ -12,8 +12,7 @@ Task Tracker tasks, so they appear in **Marketing Tasks** with a **Corporate Gif
    and/or due date), then **Send selected to Task Tracker**. A due date is required.
    The **To review** status on each row is a button with three actions that happen in place (the queue, its filter and
    scroll position stay; the row updates where it is and the tab count changes at once):
-   - **Resolve**: handled, no task. The draft leaves To review; Corporate Gifts is told `dismissed` (it has no
-     "resolved" state; both mean no task will be created), and later reads never reopen it.
+   - **Resolve**: handled, no task. A status shared with Corporate Gifts on the same request id (see below).
    - **Dismiss**: no action needed (as before).
    - **Add to task**: a drawer to confirm the title, note, assignee and due date (business: Succulents Box), then it is
      sent as one task. The row shows Sending… / Sent (with **Open in Task Tracker**) / Needs retry (**Retry**).
@@ -22,6 +21,14 @@ Task Tracker tasks, so they appear in **Marketing Tasks** with a **Corporate Gif
    Gifts links, the Slack owner's name), brand, assignee and due date. Sending again never creates a duplicate.
 4. **After delivery** Task Tracker owns the task. A newer due date from Corporate Gifts is applied with the version
    check (never to a completed task); nothing else is changed.
+6. **Resolved, shared with Corporate Gifts.** Resolving in either app closes the request in both after the next sync:
+   resolved here is reported as `resolved`; resolved in Corporate Gifts arrives in the feed and closes the draft here
+   ("Resolved in Corporate Gifts"). Repeated clicks, stale forms (version check), rescans and stale receipts never
+   reopen it. Resolve takes the same per-draft lock as sending, so the two never interleave. When a send is in
+   progress or got no answer, Task Tracker is checked first: an existing task wins (the row shows its status and
+   link; completion belongs to that task), and an unsettled send is refused until Retry settles it. A Corporate Gifts
+   resolution waits for the same check. The dashboard sends `resolved` only once the feed advertises
+   `capabilities: ["resolved"]` (Corporate Gifts migration 008); until then it holds those receipts back.
 5. **Receipts.** Each state change is reported back to Corporate Gifts (`in_review`, `delivered` with the Task
    Tracker task id, `failed`, `dismissed`); a failed report is sent again on the next sync. Work marked done in Slack
    (or dismissed in Corporate Gifts) before it was sent is dismissed here.

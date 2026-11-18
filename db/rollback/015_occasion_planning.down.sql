@@ -1,14 +1,23 @@
 -- Rolls back 015. Deploy the previous build first.
 -- "Resolved" items become "dismissed" (both mean: no task is created, and later scans or reads never bring them back);
 -- Slack suggestions are tagged "resolved_before_rollback" so they can be found (unless they already have 10 flags).
--- Corporate Gifts already received "dismissed" for resolved drafts, so nothing changes there.
+-- Corporate Gifts keeps "resolved" for requests already reported (it never reopens them). Before rolling this back,
+-- roll back or keep Corporate Gifts as documented in docs/ROLLOUT_OCCASION_PLANNING.md: the previous dashboard build
+-- refuses feed rows whose status it does not know (it skips them, it does not reopen them).
 -- Black Friday and Cyber Monday are deactivated, not deleted, because plans or promotions may link to them.
 -- Occasion links on Slack suggestions and plan categories are dropped.
 begin;
 alter table corporate_task_drafts drop constraint if exists corporate_task_drafts_resolved_not_sent;
+alter table corporate_task_drafts drop constraint if exists corporate_task_drafts_resolved_in;
 alter table corporate_task_drafts drop constraint corporate_task_drafts_status_check;
+alter table corporate_task_drafts drop constraint corporate_task_drafts_receipt_state_check;
 update corporate_task_drafts set status = 'dismissed', updated_at = now(), version = version + 1 where status = 'resolved';
+-- The previous build only knows these receipt states; Corporate Gifts keeps its own "resolved" (it never reopens it).
+update corporate_task_drafts set receipt_state = 'dismissed' where receipt_state = 'resolved';
 alter table corporate_task_drafts add constraint corporate_task_drafts_status_check check (status in ('pending', 'approved', 'dismissed'));
+alter table corporate_task_drafts add constraint corporate_task_drafts_receipt_state_check
+  check (receipt_state is null or receipt_state in ('in_review', 'delivered', 'failed', 'dismissed'));
+alter table corporate_task_drafts drop column if exists resolved_in;
 
 alter table review_suggestions drop constraint if exists review_suggestions_resolved_not_sent;
 alter table review_suggestions drop constraint review_suggestions_status_check;

@@ -1,6 +1,6 @@
 -- Occasion planning: occasion aliases (and Black Friday / Cyber Monday), product categories on plans, Slack Review
 -- suggestions linked to occasions, and the "resolved" review status (handled, no task) for Slack Review and Corporate
--- Gifts. Rollback: db/rollback/015_occasion_planning.down.sql
+-- Gifts (shared with the Corporate Gifts app for its requests). Rollback: db/rollback/015_occasion_planning.down.sql
 --
 -- The occasion rows below are also written by server/giftSeed.ts (shared/giftCalendar.ts); they are included here so
 -- the migration is complete on its own when applied without the seed.
@@ -77,3 +77,10 @@ create index review_suggestions_occasion on review_suggestions (occasion_id, occ
 alter table corporate_task_drafts drop constraint corporate_task_drafts_status_check;
 alter table corporate_task_drafts add constraint corporate_task_drafts_status_check check (status in ('pending', 'approved', 'dismissed', 'resolved'));
 alter table corporate_task_drafts add constraint corporate_task_drafts_resolved_not_sent check (status <> 'resolved' or delivery_status in ('not_sent', 'failed'));
+-- "resolved" is shared with Corporate Gifts (its migration 008): the same request id, resolved in either app, is closed
+-- in both. resolved_in records where it was resolved; receipt_state can now be "resolved".
+alter table corporate_task_drafts add column resolved_in text check (resolved_in is null or resolved_in in ('dashboard', 'corporate_gifts'));
+alter table corporate_task_drafts add constraint corporate_task_drafts_resolved_in check ((status = 'resolved') = (resolved_in is not null));
+alter table corporate_task_drafts drop constraint corporate_task_drafts_receipt_state_check;
+alter table corporate_task_drafts add constraint corporate_task_drafts_receipt_state_check
+  check (receipt_state is null or receipt_state in ('in_review', 'delivered', 'failed', 'dismissed', 'resolved'));
