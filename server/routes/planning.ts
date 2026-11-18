@@ -5,10 +5,11 @@ import { badRequest, readJson } from "../http";
 import { isIsoDate } from "../../shared/dates";
 import { audit } from "../audit";
 import {
-  CHANNELS, PLAN_BUSINESSES, isPlanningOwner, planningOwnerEmail, teamWindow, planningToday, listPlans, getPlan, createPlan, updatePlan, deletePlan,
+  CHANNELS, PLAN_BUSINESSES, categoryOptions, isPlanningOwner, planningOwnerEmail, teamWindow, planningToday, listPlans, getPlan, createPlan, updatePlan, deletePlan,
   previewSend, publishAndSend, refreshFromTracker, updateDeadline, assertOwner,
 } from "../planning";
 import { trackerDirectory, planningTrackerConfigured } from "../adapters/planningClient";
+import { planningTimeline } from "../planningTimeline";
 
 const date = z.string().refine(isIsoDate, "must be a date");
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
@@ -23,7 +24,7 @@ const planSchema = z.object({
   gift_occasion_id: z.string().regex(/^[a-z0-9-]{2,60}$/).nullable().optional(), occurrence_year: z.number().int().min(2000).max(2100).nullable().optional(),
   sheet_occasion_id: uuid.nullable().optional(), promotion_id: uuid.nullable().optional(),
   prep_start: date, campaign_start: date, campaign_end: date,
-  objective: txt(2000), channels: z.array(z.enum(CHANNELS)).max(12).optional(), target_audience: txt(500), message_angle: txt(500), deliverables: txt(2000), notes: txt(4000),
+  objective: txt(2000), channels: z.array(z.enum(CHANNELS)).max(12).optional(), categories: z.array(line(60)).max(10).optional(), target_audience: txt(500), message_angle: txt(500), deliverables: txt(2000), notes: txt(4000),
   assignments: z.array(assignment).max(40).optional(),
 }).strict().superRefine((v, ctx) => {
   if (v.prep_start > v.campaign_start) ctx.addIssue({ code: "custom", path: ["prep_start"], message: "Prep must start on or before the campaign starts." });
@@ -43,13 +44,22 @@ export function registerPlanning(r: Router) {
   });
 
   r.get("/planning/plans", async ({ url, session }) => {
-    const y = url.searchParams.get("year"), b = url.searchParams.get("business"), ch = url.searchParams.get("channel"), st = url.searchParams.get("status"), q = url.searchParams.get("q");
+    const y = url.searchParams.get("year"), b = url.searchParams.get("business"), ch = url.searchParams.get("channel"), st = url.searchParams.get("status"), q = url.searchParams.get("q"), cat = url.searchParams.get("category");
+    if (cat && cat.length > 60) throw badRequest("Invalid category.");
     if (y && !/^\d{4}$/.test(y)) throw badRequest("Invalid year.");
     if (b && !(PLAN_BUSINESSES as readonly string[]).includes(b)) throw badRequest("Invalid brand.");
     if (ch && !(CHANNELS as readonly string[]).includes(ch)) throw badRequest("Invalid channel.");
     if (st && !["draft", "published"].includes(st)) throw badRequest("Invalid status.");
     if (q && q.length > 100) throw badRequest("Search is too long.");
-    return { items: await listPlans(session, { year: y ? Number(y) : null, business: b, channel: ch, status: st, q }), owner: isPlanningOwner(session) };
+    return { items: await listPlans(session, { year: y ? Number(y) : null, business: b, channel: ch, category: cat, status: st, q }), owner: isPlanningOwner(session) };
+  });
+
+  r.get("/planning/categories", async ({ session }) => ({ items: await categoryOptions(session) }));
+  r.get("/planning/timeline", async ({ url, session }) => {
+    const b = url.searchParams.get("business"), cat = url.searchParams.get("category");
+    if (b && !(PLAN_BUSINESSES as readonly string[]).includes(b)) throw badRequest("Invalid brand.");
+    if (cat && cat.length > 60) throw badRequest("Invalid category.");
+    return planningTimeline(session, { business: b, category: cat, seasonal: url.searchParams.get("seasonal") !== "0" });
   });
 
   r.get("/planning/plans/:id", async ({ params, session }) => ({ plan: await getPlan(session, params.id), owner: isPlanningOwner(session) }));

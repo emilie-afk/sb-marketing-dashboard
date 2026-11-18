@@ -101,7 +101,8 @@ async function upsertDraft(t: CgTask, brand: { id: string; name: string } | null
     }
     await c.query(`update corporate_task_drafts set cg_title = $2, cg_brief = $3, owner_hint = $4, partners = $5, cg_due_date = $6, slack_status = $7,
                      cg_delivery_status = $8, cg_content_version = $9, cg_read_at = now(), updated_at = now() where id = $1`, [t.id, ...cg]);
-    const open = ["not_sent", "failed"].includes(cur.delivery_status) && cur.status !== "dismissed";
+    // Resolved (handled without a task) and dismissed drafts are closed: a later read never reopens them.
+    const open = ["not_sent", "failed"].includes(cur.delivery_status) && !["dismissed", "resolved"].includes(cur.status);
     if (open) {
       if (t.slack_status !== "open" || t.delivery_status === "dismissed") {
         // Done or cancelled in Slack, or dismissed in Corporate Gifts: no task is created for it.
@@ -148,7 +149,8 @@ export async function flushReceipts() {
   const receipts: TaskReceipt[] = rows.map((r) => {
     if (r.delivery_status === "created") return { id: r.id, content_version: r.synced_content_version ?? r.cg_content_version, state: "delivered",
       tracker: { task_id: r.tracker_task_id, status: r.tracker_status ?? "open", assignee: r.tracker_assignee_name_now ?? r.tracker_assignee_name, due_date: r.tr_due, open_url: openUrl(r.tracker_task_id) } };
-    if (r.status === "dismissed") return { id: r.id, content_version: r.cg_content_version, state: "dismissed" };
+    // Corporate Gifts has no "resolved" state: resolved (handled, no task) is reported as dismissed, i.e. no task will be created.
+    if (r.status === "dismissed" || r.status === "resolved") return { id: r.id, content_version: r.cg_content_version, state: "dismissed" };
     if (r.delivery_status === "failed") return { id: r.id, content_version: r.cg_content_version, state: "failed", error: (r.delivery_error ?? "Delivery failed.").slice(0, 500) };
     return { id: r.id, content_version: r.cg_content_version, state: "in_review" };
   });
@@ -190,12 +192,12 @@ function dto(d: any) {
 
 export async function pendingCorporateCount(s: Session) {
   assertReviewer(s);
-  return (await one<{ n: number }>("select count(*)::int n from corporate_task_drafts where status = 'pending' or delivery_status in ('failed', 'unknown')"))!.n;
+  return (await one<{ n: number }>("select count(*)::int n from corporate_task_drafts where (status = 'pending' or delivery_status in ('failed', 'unknown')) and status not in ('dismissed', 'resolved')"))!.n;
 }
 
 export async function listDrafts(s: Session, status: string) {
   assertReviewer(s);
-  const where = status === "pending" ? "where d.status = 'pending' or d.delivery_status in ('failed', 'unknown', 'sending')" : status === "all" ? "" : `where d.status = '${status === "approved" ? "approved" : "dismissed"}'`;
+  const where = status === "pending" ? "where (d.status = 'pending' or d.delivery_status in ('failed', 'unknown', 'sending')) and d.status not in ('dismissed', 'resolved')" : status === "all" ? "" : `where d.status = '${status === "approved" ? "approved" : status === "resolved" ? "resolved" : "dismissed"}'`;
   const rows = await query<any>(`select ${COLS} from corporate_task_drafts d ${where} order by d.created_at desc limit 300`);
   return { items: rows.map(dto), last_sync: lastSync, tracker_connected: planningTrackerConfigured() };
 }
@@ -226,6 +228,7 @@ async function checkAssignee(assigneeId: string) {
 function assertEditable(cur: any) {
   if (["sending", "created", "unknown"].includes(cur.delivery_status)) throw new HttpError(409, "delivery_locked", "A Task Tracker task exists or may exist for this draft; change it in Task Tracker.");
   if (cur.status === "dismissed") throw new HttpError(409, "dismissed", "This draft was dismissed.");
+  if (cur.status === "resolved") throw new HttpError(409, "resolved", "This draft was resolved (handled without a task).");
 }
 
 export async function editDraft(s: Session, id: string, v: z.infer<typeof draftEditSchema>) {
@@ -257,7 +260,7 @@ export async function bulkAssign(s: Session, v: z.infer<typeof bulkAssignSchema>
   await tx(async (c) => {
     for (const id of [...new Set(v.ids)]) {
       const cur = await lockRow(c, id);
-      if (!cur || cur.status === "dismissed" || ["sending", "created", "unknown"].includes(cur.delivery_status)) { skipped++; continue; }
+      if (!cur || ["dismissed", "resolved"].includes(cur.status) || ["sending", "created", "unknown"].includes(cur.delivery_status)) { skipped++; continue; }
       await c.query(`update corporate_task_drafts set due_date = coalesce($2, due_date), edited = edited or $2 is not null, updated_at = now(), version = version + 1
                        ${who ? ", tracker_brand_id = $3, tracker_brand_name = $4, tracker_assignee_id = $5, tracker_assignee_name = $6" : ""} where id = $1`,
         [id, v.due_date ?? null, ...(who ? [who.brand.id, who.brand.name, who.person.id, who.person.name] : [])]);
@@ -278,6 +281,7 @@ async function sendOne(id: string, dir: Directory | null) {
       if (!cur) return { skip: "Not found." };
       if (cur.delivery_status === "created") return { skip: null, created: true };
       if (cur.status === "dismissed") return { skip: "Dismissed." };
+      if (cur.status === "resolved") return { skip: "Resolved." };
       const missing = needs(cur);
       if (missing.length) return { skip: missing.join("; ") };
       await c.query(`update corporate_task_drafts set status = 'approved', reviewed_at = coalesce(reviewed_at, now()), delivery_status = 'sending', delivery_error = null,
@@ -324,6 +328,29 @@ export async function dismissDraft(s: Session, id: string, version: number) {
   });
   await flushReceipts();
   return dto(await one<any>(`select ${COLS} from corporate_task_drafts d where d.id = $1`, [id]));
+}
+
+/** Resolve: handled outside Task Tracker. Leaves "To review", creates no task; Corporate Gifts is told no task will be created. */
+export async function resolveDraft(s: Session, id: string, version: number) {
+  assertReviewer(s);
+  await tx(async (c) => {
+    const cur = await lockRow(c, id);
+    if (!cur) throw notFound("Draft");
+    if (cur.version !== version) throw new HttpError(409, "conflict", "This draft changed in another window. Reload first.");
+    if (!["not_sent", "failed"].includes(cur.delivery_status)) throw new HttpError(409, "delivery_locked", "A Task Tracker task exists or may exist for this draft, so it can't be resolved.");
+    if (!["pending", "approved"].includes(cur.status)) throw new HttpError(409, "not_open", cur.status === "resolved" ? "Already resolved." : "This draft was dismissed.");
+    await c.query("update corporate_task_drafts set status = 'resolved', reviewed_at = now(), receipt_due = true, updated_at = now(), version = version + 1 where id = $1", [id]);
+  });
+  await flushReceipts();
+  return dto(await one<any>(`select ${COLS} from corporate_task_drafts d where d.id = $1`, [id]));
+}
+
+export async function getDraft(s: Session, id: string) {
+  assertReviewer(s);
+  if (!/^[0-9a-f-]{36}$/.test(id)) throw notFound("Draft");
+  const d = await one<any>(`select ${COLS} from corporate_task_drafts d where d.id = $1`, [id]);
+  if (!d) throw notFound("Draft");
+  return dto(d);
 }
 
 export async function refreshDrafts(s: Session) {

@@ -22,6 +22,7 @@ import { trackerOrigin } from "./adapters/taskTracker";
 import { deliverClaimed, checkAgainstDirectory, claimedTimes, reconcile, setDelivery } from "./trackerDelivery";
 import { hit, clientKey } from "./rateLimit";
 import { isIsoDate } from "../shared/dates";
+import { loadOccasionIndex, matchSuggestion, storeMatch, placeOccasion, type OccasionIndex } from "./occasionLinks";
 
 // ------------------------------------------------------------ access
 /** The queue does not exist for anyone but the planning owner. */
@@ -102,6 +103,7 @@ export async function handleReviewIntake(req: Request, path: string): Promise<Re
       if (st.checkpoint_ts && (!b.range.from_ts || tsNum(b.range.from_ts) > tsNum(st.checkpoint_ts)))
         throw new HttpError(409, "checkpoint_gap", "The batch must start at or before the saved checkpoint.", [{ field: "range.from_ts", message: `must be at or before ${st.checkpoint_ts}` }]);
       let created = 0, followups = 0, unchanged = 0;
+      let idx: OccasionIndex | null = null;
       for (const s of b.suggestions) {
         const key = `slack:${channel}:${s.message_ts}:${s.action_id}`;
         if (s.followup_of) {
@@ -121,10 +123,15 @@ export async function handleReviewIntake(req: Request, path: string): Promise<Re
         const r = await c.query(
           `insert into review_suggestions (source_key, channel_id, message_ts, thread_ts, posted_at, message_url, thread_url, excerpt, scanner_note, deadline_text, flags,
                                            suggested_title, suggested_brief, suggested_business, suggested_assignee, suggested_due_date, title, brief, business_id, due_date)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$12,$13,$14,$16) on conflict (source_key) do nothing`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$12,$13,$14,$16) on conflict (source_key) do nothing returning id`,
           [key, channel, s.message_ts, s.thread_ts ?? null, s.posted_at, s.message_url ?? null, s.thread_url ?? null, s.excerpt, s.scanner_note ?? null, s.deadline_text ?? null, s.flags ?? [],
             s.title.trim(), s.brief ?? null, s.business ?? null, s.assignee_hint ?? null, s.due_date ?? null]);
-        if (r.rowCount) created++; else unchanged++;
+        if (r.rowCount) {
+          created++;
+          // Suggest an occasion for the new suggestion only. An existing one keeps whatever the owner chose.
+          idx ??= await loadOccasionIndex(c);
+          await storeMatch(c, r.rows[0].id, matchSuggestion(idx, { title: s.title, brief: s.brief, excerpt: s.excerpt, deadline_text: s.deadline_text, business_id: s.business ?? null, due_date: s.due_date ?? null, posted_at: s.posted_at }));
+        } else unchanged++;
       }
       // The checkpoint moves forward only now, in the transaction that accepted the batch, and never backwards.
       const next = !st.checkpoint_ts || tsNum(b.checkpoint_ts) > tsNum(st.checkpoint_ts) ? b.checkpoint_ts : st.checkpoint_ts;
@@ -147,9 +154,10 @@ const COLS = `s.id, s.source_key, s.channel_id, s.message_ts, s.thread_ts, s.pos
   s.tracker_task_id, s.tracker_version, s.tracker_title, to_char(s.tracker_due_date,'YYYY-MM-DD') tracker_due_date, s.tracker_status, s.tracker_assignee_name_now,
   s.tracker_updated_at, s.created_at, s.updated_at,
   s.plan_id, s.plan_assignment_id, s.planned_at, mp.name plan_name, mp.status plan_status, pa.delivery_status plan_assignment_delivery,
+  s.occasion_status, s.occasion_id, s.occasion_year, s.occasion_candidates, s.occasion_matched_at, s.occasion_confirmed_at, to_char(s.prep_date,'YYYY-MM-DD') prep_date, go.name occasion_name,
   r.status sync_status, to_char(r.due_date,'YYYY-MM-DD') sync_due_date, r.title sync_title, r.assignee_name sync_assignee_name, r.source_updated_at sync_updated_at, r.removed_at sync_removed_at`;
 const FROM = `review_suggestions s left join tracker_task_records r on r.record_id = 'task:' || s.tracker_task_id::text and r.kind = 'task'
-  left join marketing_plans mp on mp.id = s.plan_id left join plan_assignments pa on pa.id = s.plan_assignment_id`;
+  left join marketing_plans mp on mp.id = s.plan_id left join plan_assignments pa on pa.id = s.plan_assignment_id left join gift_occasions go on go.id = s.occasion_id`;
 
 function taskOf(s: any) {
   if (s.delivery_status !== "created") return null;
@@ -171,7 +179,18 @@ function needs(s: any) {
   return n;
 }
 
-function dto(s: any, followups: any[] = []) {
+/** The occasion link: the owner's choice (confirmed or cleared), or the matcher's suggestion and possible matches. */
+function occasionOf(s: any, idx: OccasionIndex | null) {
+  const where = (id: string, y: number) => (idx ? placeOccasion(idx, id, y) : null);
+  return {
+    status: s.occasion_status as string, confirmed: s.occasion_status === "confirmed", confirmed_at: s.occasion_confirmed_at,
+    current: s.occasion_id ? { id: s.occasion_id, name: s.occasion_name, year: s.occasion_year, dates: where(s.occasion_id, s.occasion_year) } : null,
+    candidates: s.occasion_status === "ambiguous" ? (s.occasion_candidates ?? []).map((c: any) => ({ ...c, dates: where(c.id, c.year) })) : [],
+    prep_date: s.prep_date ?? null,
+  };
+}
+
+function dto(s: any, followups: any[] = [], idx: OccasionIndex | null = null) {
   return {
     id: s.id, status: s.status, version: s.version, edited: s.edited, reviewed_at: s.reviewed_at,
     source: { posted_at: s.posted_at, message_url: s.message_url, thread_url: s.thread_url, is_reply: !!s.thread_ts && s.thread_ts !== s.message_ts, excerpt: s.excerpt, scanner_note: s.scanner_note,
@@ -187,6 +206,7 @@ function dto(s: any, followups: any[] = []) {
       // The plan's own item: removed if it was deleted from the plan (or the plan was deleted); otherwise its send state.
       item: s.plan_assignment_id ? { delivery: s.plan_assignment_delivery } : null } : null,
     locked: ["sending", "created", "unknown"].includes(s.delivery_status) || s.status === "planned",
+    occasion: occasionOf(s, idx),
   };
 }
 
@@ -195,14 +215,26 @@ export async function pendingCount(s: Session) {
   return (await one<{ n: number }>("select count(*)::int n from review_suggestions where status = 'pending'"))!.n;
 }
 
-export async function listSuggestions(s: Session, status: string, q: string | null) {
+/** Suggests occasions for suggestions that were never matched (those from before matching existed). */
+async function matchUnmatched(idx: OccasionIndex) {
+  const rows = await query<any>(`select id, title, brief, excerpt, deadline_text, business_id, suggested_business, to_char(due_date,'YYYY-MM-DD') due_date,
+                                         to_char(suggested_due_date,'YYYY-MM-DD') suggested_due_date, posted_at
+                                    from review_suggestions where occasion_matched_at is null order by posted_at desc limit 500`);
+  for (const r of rows) await tx((c) => storeMatch(c, r.id, matchSuggestion(idx, r)));
+}
+
+export async function listSuggestions(s: Session, status: string, q: string | null, occasion: "all" | "unclassified" | "classified" = "all") {
   assertReviewer(s);
+  const idx = await loadOccasionIndex();
+  await matchUnmatched(idx);
   const params: unknown[] = [];
   const where: string[] = [];
   if (status !== "all") { params.push(status); where.push(`s.status = $${params.length}`); }
+  if (occasion === "unclassified") where.push(`s.occasion_status <> 'confirmed'`);
+  if (occasion === "classified") where.push(`s.occasion_status = 'confirmed'`);
   if (q) { params.push(`%${q.replace(/[\\%_]/g, (m) => "\\" + m)}%`); where.push(`(s.title ilike $${params.length} or s.excerpt ilike $${params.length} or coalesce(s.brief,'') ilike $${params.length})`); }
   const rows = await query<any>(`select ${COLS} from ${FROM} ${where.length ? `where ${where.join(" and ")}` : ""} order by s.posted_at desc limit 300`, params);
-  return rows.map((r) => dto(r));
+  return rows.map((r) => dto(r, [], idx));
 }
 
 async function row(id: string, c?: pg.PoolClient, lock = false) {
@@ -216,7 +248,7 @@ export async function getSuggestion(s: Session, id: string) {
   const r = await row(id);
   if (!r) throw notFound("Suggestion");
   const f = await query<any>("select posted_at, message_url, excerpt from review_followups where suggestion_id = $1 order by posted_at", [id]);
-  return dto(r, f);
+  return dto(r, f, await loadOccasionIndex());
 }
 
 export const editSchema = z.object({
@@ -251,6 +283,7 @@ export async function editSuggestion(s: Session, id: string, v: z.infer<typeof e
     if (!cur) throw notFound("Suggestion");
     if (cur.version !== v.version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload, then re-apply your edit.");
     if (cur.status === "dismissed") throw new HttpError(409, "dismissed", "This suggestion was dismissed.");
+    if (cur.status === "resolved") throw new HttpError(409, "resolved", RESOLVED_MSG);
     if (cur.status === "planned") throw new HttpError(409, "planned", PLANNED_MSG);
     if (["sending", "created", "unknown"].includes(cur.delivery_status)) throw new HttpError(409, "delivery_locked", "A Task Tracker task exists or may exist for this suggestion; change it in Task Tracker (or use Check Task Tracker first).");
     await c.query(`update review_suggestions set title = $2, brief = $3, business_id = $4, tracker_brand_id = $5, tracker_brand_name = $6, tracker_assignee_id = $7,
@@ -289,6 +322,7 @@ export async function createFromSuggestion(s: Session, id: string, version: numb
       if (cur.delivery_status === "created") return null;                       // already created: nothing to send
       if (cur.version !== version && !["sending", "unknown"].includes(cur.delivery_status)) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload before creating the task.");
       if (cur.status === "dismissed") throw new HttpError(409, "dismissed", "This suggestion was dismissed.");
+      if (cur.status === "resolved") throw new HttpError(409, "resolved", RESOLVED_MSG);
       if (cur.status === "planned") throw new HttpError(409, "planned", PLANNED_MSG);
       const missing = needs(cur);
       if (missing.length) throw new HttpError(422, "incomplete", `Before creating the task: ${missing.join("; ")}.`);
@@ -328,6 +362,59 @@ export async function dismissSuggestion(s: Session, id: string, version: number)
   return getSuggestion(s, id);
 }
 
+const RESOLVED_MSG = "This suggestion was resolved (handled without a task).";
+
+/** Resolve: handled, no task. Leaves "To review"; later scans never bring it back. Nothing is sent anywhere. */
+export async function resolveSuggestion(s: Session, id: string, version: number) {
+  assertReviewer(s);
+  await tx(async (c) => {
+    const cur = await row(id, c, true);
+    if (!cur) throw notFound("Suggestion");
+    if (cur.version !== version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload first.");
+    if (cur.status === "planned") throw new HttpError(409, "planned", PLANNED_MSG);
+    if (!["pending", "approved"].includes(cur.status) || !["not_sent", "failed"].includes(cur.delivery_status))
+      throw new HttpError(409, "not_open", cur.status === "resolved" ? "Already resolved." : "Only a suggestion still to review (or one whose task was never created) can be resolved.");
+    await c.query("update review_suggestions set status = 'resolved', reviewed_at = now(), updated_at = now(), version = version + 1 where id = $1", [id]);
+  });
+  return getSuggestion(s, id);
+}
+
+export const classifySchema = z.object({
+  version: z.number().int().min(1),
+  // null clears the link; omitted leaves it as it is.
+  occasion: z.object({ id: z.string().regex(/^[a-z0-9-]{2,60}$/), year: z.number().int().min(2000).max(2100) }).strict().nullable().optional(),
+  prep_date: z.string().refine(isIsoDate, "must be a date").nullable().optional(),
+}).strict();
+
+/**
+ * Set, change, confirm or clear the occasion (and the manual prep date). Only the link changes: nothing is published,
+ * no task is created, and the review status is untouched. Later scans never overwrite it.
+ */
+export async function classifySuggestion(s: Session, id: string, v: z.infer<typeof classifySchema>) {
+  assertReviewer(s);
+  await tx(async (c) => {
+    const cur = await row(id, c, true);
+    if (!cur) throw notFound("Suggestion");
+    if (cur.version !== v.version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload first.");
+    if (v.occasion !== undefined) {
+      if (v.occasion) {
+        const o = (await c.query("select kind, (select array_agg(business_id) from gift_occasion_brands b where b.occasion_id = o.id) brands from gift_occasions o where id = $1 and active", [v.occasion.id])).rows[0];
+        if (!o || o.kind !== "dated") throw badRequest("Choose a dated occasion.");
+        const biz = cur.business_id ?? cur.suggested_business;
+        if (biz && !(o.brands ?? []).includes(biz)) throw badRequest("That occasion does not apply to this suggestion's business.");
+        await c.query(`update review_suggestions set occasion_status = 'confirmed', occasion_id = $2, occasion_year = $3, occasion_confirmed_at = now(), occasion_matched_at = coalesce(occasion_matched_at, now())
+                        where id = $1`, [id, v.occasion.id, v.occasion.year]);
+      } else {
+        await c.query(`update review_suggestions set occasion_status = 'cleared', occasion_id = null, occasion_year = null, occasion_confirmed_at = now(), occasion_matched_at = coalesce(occasion_matched_at, now())
+                        where id = $1`, [id]);
+      }
+    }
+    if (v.prep_date !== undefined) await c.query("update review_suggestions set prep_date = $2 where id = $1", [id, v.prep_date]);
+    await c.query("update review_suggestions set updated_at = now(), version = version + 1 where id = $1", [id]);
+  });
+  return getSuggestion(s, id);
+}
+
 const PLANNED_MSG = "This suggestion is in a marketing plan. Change or remove it in the plan.";
 
 export const addToPlanSchema = z.object({ version: z.number().int().min(1), plan_id: z.string().uuid() }).strict();
@@ -338,9 +425,18 @@ export async function planChoices(s: Session, id: string) {
   const r = await row(id);
   if (!r) throw notFound("Suggestion");
   if (!r.business_id) return { business: null, plans: [] };
-  const plans = await query<any>(`select id, name, to_char(prep_start,'YYYY-MM-DD') prep_start, to_char(campaign_start,'YYYY-MM-DD') campaign_start, to_char(campaign_end,'YYYY-MM-DD') campaign_end
-                                    from marketing_plans where status = 'draft' and business_id = $1 order by campaign_start, name limit 200`, [r.business_id]);
-  return { business: r.business_id, plans };
+  const linked = r.occasion_status === "confirmed" ? { id: r.occasion_id, year: r.occasion_year } : null;
+  const rows = await query<any>(`select p.id, p.name, to_char(p.prep_start,'YYYY-MM-DD') prep_start, to_char(p.campaign_start,'YYYY-MM-DD') campaign_start, to_char(p.campaign_end,'YYYY-MM-DD') campaign_end,
+                                        p.gift_occasion_id, p.occurrence_year, g.name occasion_name, p.categories
+                                   from marketing_plans p left join gift_occasions g on g.id = p.gift_occasion_id
+                                  where p.status = 'draft' and p.business_id = $1 order by p.campaign_start, p.name limit 200`, [r.business_id]);
+  // Plans for the suggestion's confirmed occasion first; a plan linked to another occasion carries a warning.
+  const plans = rows.map((p) => ({ id: p.id, name: p.name, prep_start: p.prep_start, campaign_start: p.campaign_start, campaign_end: p.campaign_end, categories: p.categories ?? [],
+    occasion: p.gift_occasion_id ? { id: p.gift_occasion_id, name: p.occasion_name, year: p.occurrence_year } : null,
+    match: !linked ? "none" : p.gift_occasion_id === linked.id && p.occurrence_year === linked.year ? "same" : p.gift_occasion_id ? "different" : "none" }));
+  const rank = (m: string) => (m === "same" ? 0 : m === "none" ? 1 : 2);
+  plans.sort((a, b) => rank(a.match) - rank(b.match));
+  return { business: r.business_id, occasion: linked ? { ...linked, name: r.occasion_name } : null, plans };
 }
 
 /**

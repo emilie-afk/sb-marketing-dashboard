@@ -37,9 +37,10 @@ function PlanningTabs({ owner, active }: { owner: boolean; active: "plans" | "re
 // ====================================================================== list and timeline
 function PlanList({ meta }: { meta: any }) {
   const [q, setQ] = useHashQuery();
-  const year = q.get("year") ?? "", business = q.get("business") ?? "", channel = q.get("channel") ?? "", status = q.get("status") ?? "";
-  const qs = new URLSearchParams(Object.entries({ year, business, channel, status }).filter(([, v]) => v) as [string, string][]).toString();
+  const year = q.get("year") ?? "", business = q.get("business") ?? "", channel = q.get("channel") ?? "", status = q.get("status") ?? "", category = q.get("category") ?? "";
+  const qs = new URLSearchParams(Object.entries({ year, business, channel, status, category }).filter(([, v]) => v) as [string, string][]).toString();
   const s = useApi<any>(`/planning/plans${qs ? `?${qs}` : ""}`, [qs]);
+  const cats = useApi<any>("/planning/categories");
   const thisYear = Number(meta.today.slice(0, 4));
   return <div>
     <div className="toolbar">
@@ -47,9 +48,13 @@ function PlanList({ meta }: { meta: any }) {
       <label>Year <select value={year} onChange={(e) => setQ({ year: e.target.value || null })}><option value="">All</option>{[thisYear - 1, thisYear, thisYear + 1, thisYear + 2].map((y) => <option key={y} value={y}>{y}</option>)}</select></label>
       <label>Brand <select value={business} onChange={(e) => setQ({ business: e.target.value || null })}><option value="">All</option>{Object.entries(BUSINESS_NAMES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
       <label>Channel <select value={channel} onChange={(e) => setQ({ channel: e.target.value || null })}><option value="">All</option>{meta.channels.map((c: string) => <option key={c}>{c}</option>)}</select></label>
+      <label>Product category <select value={category} onChange={(e) => setQ({ category: e.target.value || null })}><option value="">All</option>
+        {(cats.data?.items ?? []).map((c: any) => <option key={c.name} value={c.name}>{c.name}</option>)}{category && !(cats.data?.items ?? []).some((c: any) => c.name === category) && <option value={category}>{category}</option>}</select></label>
       {meta.owner && <label>Status <select value={status} onChange={(e) => setQ({ status: e.target.value || null })}><option value="">All</option><option value="draft">Draft</option><option value="published">Published</option></select></label>}
       {meta.owner && <a className="btn small primary" href="#/planning/new">New plan</a>}
     </div>
+    <NextTwoQuarters business={business} category={category} owner={meta.owner} />
+    <h3 style={{ marginTop: 18 }}>Plans</h3>
     <p className="sub">{meta.owner ? "Full planning timeline, including drafts and ended plans." : `View only: published plans whose preparation starts between ${fmtDate(meta.window.from)} and ${fmtDate(meta.window.to)}, and plans in progress.`}
       {" "}Task Tracker owns assigned tasks: complete and edit them there.</p>
     {meta.owner && !meta.configured && <div className="notice">PLANNING_OWNER_EMAIL is not set on the server.</div>}
@@ -60,9 +65,9 @@ function PlanList({ meta }: { meta: any }) {
       for (const p of d.items) { const m = p.prep_start.slice(0, 7); months.set(m, [...(months.get(m) ?? []), p]); }
       return [...months.entries()].map(([m, list]) => <section key={m}>
         <h3 className="agenda-month">Prep starts {new Date(`${m}-01T00:00:00Z`).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })}</h3>
-        <div className="table-wrap"><table><thead><tr><th>Plan</th><th>Brand</th><th>Occasion</th><th>Prep start</th><th>Campaign</th><th>Channels</th><th>Status</th><th>Tasks</th></tr></thead>
+        <div className="table-wrap"><table><thead><tr><th>Plan</th><th>Brand</th><th>Occasion</th><th>Categories</th><th>Prep start</th><th>Campaign</th><th>Channels</th><th>Status</th><th>Tasks</th></tr></thead>
           <tbody>{list.map((p) => <tr key={p.id} className="clickable" onClick={() => { location.hash = `#/planning/${p.id}`; }}>
-            <td><a href={`#/planning/${p.id}`}><b>{p.name}</b></a></td><td>{p.business}</td><td>{occasionText(p.occasion)}</td><td>{fmtDate(p.prep_start)}</td>
+            <td><a href={`#/planning/${p.id}`}><b>{p.name}</b></a></td><td>{p.business}</td><td>{occasionText(p.occasion) || <span className="sub">—</span>}</td><td>{p.categories?.length ? p.categories.map((c: string) => <span key={c} className="chip muted" style={{ marginRight: 4 }}>{c}</span>) : <span className="sub">—</span>}</td><td>{fmtDate(p.prep_start)}</td>
             <td>{range({ start: p.campaign_start, end: p.campaign_end })}</td><td>{p.channels.join(", ")}</td>
             <td><span className={`chip ${p.status === "draft" ? "muted" : ""}`}>{STATUS_LABEL[p.status]}</span></td>
             <td>{p.task_count}{meta.owner && p.pending_count ? <span className="sub"> · {p.pending_count} not sent</span> : null}</td></tr>)}</tbody></table></div>
@@ -70,6 +75,54 @@ function PlanList({ meta }: { meta: any }) {
     }}</Async>
   </div>;
 }
+// ====================================================================== next two quarters
+/**
+ * The two calendar quarters after this one, in six month columns. Prep start, campaign dates and the occasion date
+ * are drawn differently; a suggested prep start (occasion with no plan) is dashed and labelled. The owner also sees
+ * her drafts and the Slack suggestions she linked to each occasion; the server sends nobody else any of that.
+ */
+function NextTwoQuarters({ business, category, owner }: { business: string; category: string; owner: boolean }) {
+  const qs = new URLSearchParams(Object.entries({ business, category }).filter(([, x]) => x) as [string, string][]).toString();
+  const s = useApi<any>(`/planning/timeline${qs ? `?${qs}` : ""}`, [qs]);
+  const short = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  return <section aria-label="Next two quarters">
+    <Async s={s}>{(d) => {
+      const startNow = d.entries.filter((e: any) => e.start_now);
+      const title = (e: any) => e.occasion ? `${e.occasion.name} ${e.occasion.year}` : e.plans[0]?.name;
+      return <>
+        <h3 style={{ marginBottom: 2 }}>Next two quarters <span className="sub">{fmtDate(d.window.from)} – {fmtDate(d.window.to)}</span></h3>
+        <div className="row legend sub" aria-label="Legend"><span className="tl-date prep">Prep start</span><span className="tl-date prep suggested">Suggested prep</span><span className="tl-date campaign">Campaign</span><span className="tl-date occasion">Occasion date</span>{owner && <span className="tl-date needed">Prep date needed</span>}</div>
+        {startNow.length > 0 && <div className="start-now"><b>Start preparing now</b> <span className="sub">prep starts before {fmtDate(d.window.from)}</span>
+          <ul>{startNow.map((e: any) => <li key={e.key}><b>{title(e)}</b>: prep {e.plans.length || e.suggestions.some((x: any) => x.prep) ? "from" : "suggested from"} {fmtDate(e.earliest_prep)}
+            {e.occasion?.start && <span className="sub"> · occasion {e.occasion.text}</span>}
+            {owner && !e.plans.length && e.kind === "occasion" && <> · <a href={`#/planning/new?gift=${e.occasion.id}&year=${e.occasion.year}${business ? `&business=${business}` : ""}`}>Plan this occasion</a></>}</li>)}</ul></div>}
+        <div className="timeline">{d.months.map((m: string) => <div key={m} className="col">
+          <h4>{new Date(`${m}-01T00:00:00Z`).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })}</h4>
+          {d.entries.filter((e: any) => e.month === m).map((e: any) => <div key={e.key} className="tl-card">
+            {e.kind === "occasion" ? <span className="name">{e.occasion.name}</span> : <a className="name" href={`#/planning/${e.plans[0].id}`}>{e.plans[0].name}</a>}
+            {e.occasion && e.kind === "occasion" && <span className="tl-date occasion" title="Occasion date">{e.occasion.tbc ? e.occasion.text : `${short(e.occasion.start)}${e.occasion.end !== e.occasion.start ? `–${short(e.occasion.end)}` : ""}`}</span>}
+            {e.kind === "plan" && e.occasion && <span className="sub">{e.occasion.name} {e.occasion.year}</span>}
+            {e.kind === "occasion" && !e.plans.length && (e.suggested_prep ? <span className="tl-date prep suggested" title="Suggested: seven weeks before the occasion">Suggested prep {short(e.suggested_prep)}</span>
+              : e.occasion.tbc ? <span className="sub">Prep date once dates are confirmed</span> : null)}
+            {e.plans.map((p: any) => <div key={p.id}>
+              {e.kind === "occasion" && <a href={`#/planning/${p.id}`}><b>{p.name}</b></a>} {owner && p.status === "draft" && <span className="chip muted">Draft</span>}
+              <div><span className="tl-date prep" title="Prep start">Prep {short(p.prep_start)}</span> <span className="tl-date campaign" title="Campaign">{short(p.campaign_start)}–{short(p.campaign_end)}</span></div>
+              {p.categories.length > 0 && <div className="sub">{p.categories.join(" · ")}</div>}
+              {!business && <div className="sub">{p.business_name}</div>}</div>)}
+            {owner && e.kind === "occasion" && !e.plans.length && <a className="sub" href={`#/planning/new?gift=${e.occasion.id}&year=${e.occasion.year}${business ? `&business=${business}` : ""}`}>Plan this occasion</a>}
+            {owner && e.suggestions.length > 0 && <div className="tl-sug"><span className="sub">From Slack Review ({e.suggestions.length})</span>
+              {e.suggestions.map((x: any) => <div key={x.id}><a href={`#/planning/review/${x.id}`}>{x.title}</a>{" "}
+                {x.prep ? <span className="tl-date prep" title={x.prep.kind === "manual" ? "Your prep date" : "Task due date"}>{x.prep.kind === "manual" ? "Prep" : "Due"} {short(x.prep.date)}</span> : <span className="tl-date needed">Prep date needed</span>}
+                {x.open_url && <> <a className="sub" href={x.open_url} target="_blank" rel="noopener noreferrer">Task</a></>}</div>)}</div>}
+          </div>)}
+          {!d.entries.some((e: any) => e.month === m) && <span className="sub">Nothing planned</span>}
+        </div>)}</div>
+        <p className="sub">{d.note}</p>
+      </>;
+    }}</Async>
+  </section>;
+}
+
 const occasionText = (o: any) => (!o ? "" : o.kind === "gift" ? `${o.name}${o.year ? ` ${o.year}` : ""}` : `${o.name} (${fmtDate(o.date)})`);
 
 // ====================================================================== detail
@@ -104,6 +157,7 @@ function PlanDetail({ id, meta }: { id: string; meta: any }) {
           <dt>Prep starts</dt><dd>{fmtDate(p.prep_start)}</dd>
           <dt>Campaign</dt><dd>{range({ start: p.campaign_start, end: p.campaign_end })}</dd>
           {p.channels.length > 0 && <><dt>Channels</dt><dd>{p.channels.join(", ")}</dd></>}
+          {p.categories?.length > 0 && <><dt>Product categories</dt><dd>{p.categories.join(", ")}</dd></>}
           {p.target_audience && <><dt>Target audience</dt><dd>{p.target_audience}</dd></>}
           {p.message_angle && <><dt>Message angle</dt><dd>{p.message_angle}</dd></>}
           {p.objective && <><dt>Objective</dt><dd style={{ whiteSpace: "pre-wrap" }}>{p.objective}</dd></>}
@@ -211,10 +265,10 @@ export function PlanEditor({ meta, plan, onDone }: { meta: any; plan?: any; onDo
   const dir = useApi<any>(meta.owner ? "/planning/directory" : null);
   const [v, setV] = useState<any>(() => plan ? {
     business_id: plan.business_id, name: plan.name, prep_start: plan.prep_start, campaign_start: plan.campaign_start, campaign_end: plan.campaign_end,
-    objective: plan.objective ?? "", channels: plan.channels, target_audience: plan.target_audience ?? "", message_angle: plan.message_angle ?? "", deliverables: plan.deliverables ?? "", notes: plan.notes ?? "",
+    objective: plan.objective ?? "", channels: plan.channels, categories: plan.categories ?? [], target_audience: plan.target_audience ?? "", message_angle: plan.message_angle ?? "", deliverables: plan.deliverables ?? "", notes: plan.notes ?? "",
     gift_occasion_id: plan.occasion?.kind === "gift" ? plan.occasion.id : null, occurrence_year: plan.occasion?.kind === "gift" ? plan.occasion.year : null,
     sheet_occasion_id: plan.occasion?.kind === "sheet" ? plan.occasion.id : null, promotion_id: plan.promotion?.id ?? null,
-  } : { business_id: q.get("business") || "sb", name: "", prep_start: "", campaign_start: "", campaign_end: "", objective: "", channels: [], target_audience: "", message_angle: "", deliverables: "", notes: "",
+  } : { business_id: q.get("business") || "sb", name: "", prep_start: "", campaign_start: "", campaign_end: "", objective: "", channels: [], categories: q.get("category") ? [q.get("category")] : [], target_audience: "", message_angle: "", deliverables: "", notes: "",
     gift_occasion_id: gift, occurrence_year: gyear, sheet_occasion_id: sheet, promotion_id: null });
   const [asg, setAsg] = useState<Asg[]>(() => (plan?.assignments ?? []).map((a: any) => ({ id: a.id, title: a.title, brief: a.brief ?? "", tracker_brand_id: a.brand.id, tracker_assignee_id: a.assignee.id, due_date: a.due_date,
     locked: ["created", "sending", "unknown"].includes(a.delivery.status), lockNote: a.delivery.status === "created" ? "In Task Tracker" : "Send not settled", label: `${a.brand.name} · ${a.assignee.name}` })));
@@ -232,6 +286,9 @@ export function PlanEditor({ meta, plan, onDone }: { meta: any; plan?: any; onDo
   const peopleFor = (brandId: string) => (dir.data?.people ?? []).filter((p: any) => p.brand_ids.includes(brandId));
   const set = (k: string) => (e: any) => setV({ ...v, [k]: e.target.value });
   const toggle = (c: string) => setV({ ...v, channels: v.channels.includes(c) ? v.channels.filter((x: string) => x !== c) : [...v.channels, c] });
+  const cats = useApi<any>(meta.owner ? "/planning/categories" : null);
+  const [newCat, setNewCat] = useState("");
+  const toggleCat = (c: string) => setV({ ...v, categories: v.categories.includes(c) ? v.categories.filter((x: string) => x !== c) : [...v.categories, c].slice(0, 10) });
   const submit = async (e: any) => {
     e.preventDefault(); setErr(null); setSaving(true);
     const body = { ...v, occurrence_year: v.gift_occasion_id ? v.occurrence_year : null, assignments: asg.map(({ locked, lockNote, label, ...a }) => ({ ...a, brief: a.brief || null })) };
@@ -257,6 +314,9 @@ export function PlanEditor({ meta, plan, onDone }: { meta: any; plan?: any; onDo
       {label("Message angle", <input aria-label="Message angle" maxLength={500} value={v.message_angle} onChange={set("message_angle")} />, true)}
       <fieldset style={{ gridColumn: "1 / -1", border: 0, padding: 0, margin: 0 }}><legend className="sub">Channels</legend>
         <div className="row">{meta.channels.map((c: string) => <button type="button" key={c} className={`chip ${v.channels.includes(c) ? "on" : ""}`} aria-pressed={v.channels.includes(c)} onClick={() => toggle(c)}>{c}</button>)}</div></fieldset>
+      <fieldset style={{ gridColumn: "1 / -1", border: 0, padding: 0, margin: 0 }}><legend className="sub">Product categories (optional; a plan can have categories, an occasion, or both)</legend>
+        <div className="row">{[...new Set([...(cats.data?.items ?? []).map((c: any) => c.name), ...v.categories])].map((c: string) => <button type="button" key={c} className={`chip ${v.categories.includes(c) ? "on" : ""}`} aria-pressed={v.categories.includes(c)} onClick={() => toggleCat(c)}>{c}</button>)}
+          <input aria-label="New category" placeholder="Add a category" maxLength={60} value={newCat} onChange={(e) => setNewCat(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); const t = newCat.trim(); if (t && !v.categories.some((x: string) => x.toLowerCase() === t.toLowerCase())) toggleCat(t); setNewCat(""); } }} style={{ width: 170 }} /></div></fieldset>
       {label("Objective", <textarea aria-label="Objective" rows={2} maxLength={2000} value={v.objective} onChange={set("objective")} />, true)}
       {label("Deliverables", <textarea aria-label="Deliverables" rows={2} maxLength={2000} value={v.deliverables} onChange={set("deliverables")} />, true)}
       {label("Notes (not sent with tasks)", <textarea aria-label="Notes" rows={2} maxLength={4000} value={v.notes} onChange={set("notes")} />, true)}

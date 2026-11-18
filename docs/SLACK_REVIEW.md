@@ -41,6 +41,38 @@ history stay in the dashboard tables.
    later scans never reopen it. If the item is removed from the plan, or the plan is deleted, **Return to review**
    puts the suggestion back in the review list. Slack text and links are never copied into the plan.
 
+7. **Resolve** (handled, no task) takes the suggestion out of To review without creating anything; like a dismissed one,
+   later scans never bring it back.
+
+### Actions in place
+
+On the queue, the **To review** status of each row is a button: **Resolve**, **Dismiss**, **Add to task** (a drawer to
+confirm the title, brief, business, brand, assignee and due date, then send it as one task) and **Add to plan**. The
+queue, its filters and its scroll position stay as they are; the row updates where it is (Sending… / Sent with **Open in
+Task Tracker** / Needs retry with **Retry**) and the tab count changes at once.
+
+## Occasions
+
+- **Suggested at intake.** Each new suggestion is matched against the dated gift occasions' names and aliases (whole
+  words, ignoring case and apostrophes; e.g. "BF/CM", "BFCM" → Black Friday, "Xmas" → Christmas). The business narrows
+  the occasions; a year written in the message wins, otherwise an exact deadline picks the occurrence it leads into,
+  otherwise the next occurrence after the message (within about six months). Broad words such as "holiday" are not
+  aliases, so "holiday email" stays unclassified. One clear match is shown as **Suggested** (not confirmed); several
+  possible matches, or an unclear year, are listed with none chosen. Suggestions from before matching existed are
+  matched when the queue is next listed.
+- **Classified in place.** The **Occasion** column shows the confirmed occasion, the suggestion (**Confirm** /
+  **Change**), the possible matches (click one), or **Set occasion**. Change opens a searchable picker (name, dates,
+  year) on the same page, with an optional prep date; the owner can change or clear the link at any time. Classifying
+  publishes nothing, creates no task and leaves the review status alone. Scans never change a link once set.
+- **Unclassified** filter: suggestions without a confirmed occasion.
+- **Timeline.** Confirmed suggestions (to review, in a plan, or approved) appear under their occasion on the owner's
+  **Next two quarters** timeline, with the task due date or the manual prep date shown apart from the occasion date,
+  or **Prep date needed**; those with prep before the window are under **Start preparing now**. Nobody else receives
+  any of this.
+- **Add to plan** lists draft plans for the same occasion first and warns when the chosen plan is for another occasion.
+- **Add to task** creates one task; in Marketing Tasks it shows under its assignee with the occasion (e.g. "Black
+  Friday 2026"). Occasion names are public reference data; the Slack text, title of the suggestion and notes stay here.
+
 ## Delivery
 
 Creation reuses the planning delivery engine (`server/trackerDelivery.ts`): the send is recorded as "sending" under a
@@ -107,6 +139,9 @@ accepted yet; the scanner then starts from its configured start point.
 - Migration `db/migrations/013_slack_review_plans.sql` (Add to plan); rollback `db/rollback/013_slack_review_plans.down.sql`
   (deploy the previous build first). It does not reopen suggestions that are in a plan, because the plan keeps the item
   and reopening could make the same work a second task: they become "dismissed", tagged `in_plan_before_rollback`.
+- Migration `db/migrations/015_occasion_planning.sql` (occasion links, prep date, the `resolved` status, occasion aliases
+  and Black Friday / Cyber Monday); rollback `db/rollback/015_occasion_planning.down.sql` (resolved suggestions become
+  dismissed, tagged `resolved_before_rollback`; links are dropped).
 - Requires Task Tracker migration `004_task_origin.sql` and the matching deploy (accepts `origin: "review"`) before the
   first task is created.
 - Scanner instructions: [SLACK_REVIEW_SCANNER.md](SLACK_REVIEW_SCANNER.md). The scanner stays unscheduled until the queue

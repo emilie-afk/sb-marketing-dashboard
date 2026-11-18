@@ -238,3 +238,45 @@ describe("Corporate Gifts task queue", () => {
     expect(legacy.body.items.find((i: any) => i.id === `tracker:tracker-test:task:${tid}`)).toMatchObject({ category: "Corporate Gifts" });
   });
 });
+
+describe("in-place status actions", () => {
+  it("Resolve: handled with no task; leaves To review and the count at once; Corporate Gifts hears no task will be made; a later read never reopens it", async () => {
+    tracker.reset();
+    const a = cgTask({ title: "Confirm Demo Market India's spring sizes" });
+    await owner("POST", "/review/corporate/refresh", {});
+    const before = (await owner("GET", "/review/corporate/summary")).body.pending;
+    const ia = await item(a.id);
+    const r = await owner("POST", `/review/corporate/${a.id}/resolve`, { version: ia.version });
+    expect(r.status).toBe(200);
+    expect(r.body.draft).toMatchObject({ status: "resolved" });
+    expect((await owner("GET", "/review/corporate/summary")).body.pending).toBe(before - 1);
+    expect((await list("pending")).map((i) => i.id)).not.toContain(a.id);
+    expect((await list("resolved")).map((i) => i.id)).toContain(a.id);
+    expect(cg.tasks.get(a.id)!.delivery_status).toBe("dismissed");
+    expect((await owner("POST", `/review/corporate/${a.id}/resolve`, { version: r.body.draft.version })).status).toBe(409);
+    a.content_version = 2; a.title = "Confirm Demo Market India's spring sizes (updated)";
+    await syncCorporateTasks();
+    expect((await item(a.id)).status).toBe("resolved");
+    expect((await owner("POST", "/review/corporate/send", { ids: [a.id] })).body.results[0]).toMatchObject({ outcome: "skipped" });
+    expect(tracker.creates).toBe(0);
+    expect((await req("manager@example.test", "POST", `/review/corporate/${a.id}/resolve`, { version: 1 })).status).toBe(404);
+  });
+
+  it("Add to task: confirm the fields, send once; a double click or a retry links the same task", async () => {
+    tracker.reset();
+    const a = cgTask({ title: "Send Demo Market Juliet the order form" });
+    await owner("POST", "/review/corporate/refresh", {});
+    const ia = await item(a.id);
+    const ed = await owner("PATCH", `/review/corporate/${a.id}`, { version: ia.version, title: "Send Demo Market Juliet the order form", brief: "Use the 2027 form.", tracker_assignee_id: LAN, due_date: "2026-12-09" });
+    expect(ed.status).toBe(200);
+    const [x, y] = await Promise.all([owner("POST", "/review/corporate/send", { ids: [a.id] }), owner("POST", "/review/corporate/send", { ids: [a.id] })]);
+    expect([x.body.results[0].outcome, y.body.results[0].outcome].sort()).toEqual(expect.arrayContaining(["created"]));
+    expect(tracker.creates).toBe(1);
+    const again = await owner("POST", "/review/corporate/send", { ids: [a.id] });
+    expect(again.body.results[0]).toMatchObject({ outcome: "created", existing: true });
+    expect(tracker.creates).toBe(1);
+    const d = (await owner("GET", `/review/corporate/${a.id}`)).body.draft;
+    expect(d).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { open_url: expect.stringContaining("/#/tasks/") } });
+    expect(tracker.bodies[0]).toMatchObject({ assignee_id: LAN, due_date: "2026-12-09", title: "Send Demo Market Juliet the order form" });
+  });
+});
