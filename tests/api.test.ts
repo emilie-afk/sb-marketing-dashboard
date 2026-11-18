@@ -1,7 +1,7 @@
 // Database-backed behaviour through the real API handler.
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { freshDb, call, submit, q, closePool } from "./helpers";
-import { envelope, weekRange, listingCheck, annualWorkbook, seasonalWorkbook } from "./fixtures/synthetic";
+import { envelope, weekRange, listingCheck, annualWorkbook, seasonalWorkbook, scorecardLayout } from "./fixtures/synthetic";
 import { runSheetSync, intakeToSubmissions } from "../server/sheetSync";
 import { buildSnapshot } from "../server/routes/reports";
 import { READER_LIMITS, _setFetchForTests } from "../server/sheetsReader";
@@ -9,6 +9,7 @@ import { READER_LIMITS, _setFetchForTests } from "../server/sheetsReader";
 beforeAll(async () => {
   process.env.EXCLUDED_BRANDS = "Excluded Demo Brand";
   process.env.TRACKED_CHANNELS = "online_store:Online store,amazon:Marketplace A";
+  process.env.SCORECARD_LAYOUT = JSON.stringify(scorecardLayout);
   await freshDb();
 });
 afterAll(closePool);
@@ -106,18 +107,18 @@ describe("calendar-day counting across a month", () => {
   const satFri = (s: string) => ({ start: s, end: new Date(Date.parse(`${s}T00:00:00Z`) + 6 * 864e5).toISOString().slice(0, 10) });
   const weeks = ["2025-03-29", "2025-04-05", "2025-04-12", "2025-04-19", "2025-04-26"].map(satFri);
   const apr = { start: "2025-04-01", end: "2025-04-30" };
-  // EOS scorecard layout: row 3 month labels, row 4 column headers, labels in columns A and B.
-  const eos = (aprAll: number | null, fb = 150) => [{ name: "2025", rows: [[], [], [null, null, null, "APR 1-30", null, "MAY 1-31"], ["METRICS", null, "Apr 19 - 25", "TOTAL (MONTH) - Adjusted for Amazon Shipping", "Apr 26 - May 2", "TOTAL (MONTH) - Adjusted for Amazon Shipping"],
-    ["Revenue", "All", 1, aprAll, 1, null], [null, "Shopify (Website)", 1, 8000, 1, null], [null, "Amazon (w/o shipping)", 1, 1000, 1, null], [null, "Faire", 1, 300, 1, null],
-    [null, "Little Sunnie", 1, 0, 1, null], [null, "Photostosketches", 1, 500, 1, null],
-    ["Conversion rate (adjusted)\nSucculents Box", "Added to cart", 0.04, 0.05, 0.04, null], [null, "Reached check out", 0.02, 0.03, 0.02, null], [null, "Converted", 0.008, 0.01, 0.008, null],
-    ["Human vs Bot", "Bot checkout/ Human check out rate", 0.01, null, 0.01, null],
-    ["Ads Spent", "Google Ads SB", 90, 400, 90, null], [null, "Facebook Ads SB", 30, fb, 30, null], [null, "Total Ad spent (Succulents Box)", 120, 400 + fb, 120, 0], [null, "Photostosketches", 20, 90, 20, null]] }];
-  // Daily Analytics Report layout: two columns per day (revenue, orders), channel labels in column A.
+  // Monthly scorecard (invented layout): row 3 month labels, row 4 column headers, labels in columns A and B.
+  const eos = (aprAll: number | null, fb = 150) => [{ name: "2025", rows: [[], [], [null, null, null, "APR 1-30", null, "MAY 1-31"], ["METRICS", null, "Apr 19 - 25", "Month total (adjusted)", "Apr 26 - May 2", "Month total (adjusted)"],
+    ["Sales", "Everything", 1, aprAll, 1, null], [null, "Web store", 1, 8000, 1, null], [null, "Marketplace A", 1, 1000, 1, null], [null, "Wholesale", 1, 300, 1, null],
+    [null, "Side brand", 1, 0, 1, null], [null, "Second business", 1, 500, 1, null],
+    ["Funnel\nMain business", "Carts", 0.04, 0.05, 0.04, null], [null, "Checkouts", 0.02, 0.03, 0.02, null], [null, "Orders placed", 0.008, 0.01, 0.008, null],
+    ["Traffic quality", "Bot share", 0.01, null, 0.01, null],
+    ["Advertising", "Google spend", 90, 400, 90, null], [null, "Facebook spend", 30, fb, 30, null], [null, "Ad total", 120, 400 + fb, 120, 0], [null, "Second business", 20, 90, 20, null]] }];
+  // Daily workbook (invented layout): two columns per day (revenue, orders), channel labels in column A.
   const dar = (web1 = 100) => [{ name: "April 2025", rows: [["Z5"], [], [null, 1, null, 2, null, 3, null, 4],
-    ["Website", web1, 5, 110, 6, 120, 7], ["Ebay", 0, 0, 0, 0, 0, 0], ["Amazon (not plus shipping)", 20, 1, 30, 2, 0, 0], ["Cratejoy", 0, 0, 45, null, 0, 0], ["Faire (BPF)", 0, 0, 0, 0, 80, 1],
-    ["Little Sunnie"], ["Website", 999, 9, 999, 9, 999, 9], ["Photostosketches"], ["Etsy", 40, 2, 0, 0, 25, 1], ["KDP", null, null, null, null, null, null],
-    ["Total", 9999, 99, 9999, 99, 9999, 99]] }];
+    ["Web store", web1, 5, 110, 6, 120, 7], ["Channel B", 0, 0, 0, 0, 0, 0], ["Marketplace A (net)", 20, 1, 30, 2, 0, 0], ["Channel C", 0, 0, 45, null, 0, 0], ["Wholesale (net)", 0, 0, 0, 0, 80, 1],
+    ["Side brand"], ["Web store", 999, 9, 999, 9, 999, 9], ["Second business"], ["Shop B1", 40, 2, 0, 0, 25, 1], ["Shop B2", null, null, null, null, null, null],
+    ["Grand total", 9999, 99, 9999, 99, 9999, 99]] }];
   let eosSrc = "", darSrc = "";
 
   it("counts weeks only inside the month, then uses the EOS month totals and daily figures", async () => {
@@ -140,13 +141,13 @@ describe("calendar-day counting across a month", () => {
     expect(acts.map((a: any) => a.count)).toEqual([4, 7, 7, 7, 5]);
     expect(acts[0].prorated).toEqual({ days_inside: 4, days_total: 7, full_count: 7 });
 
-    // The EOS scorecard's April column: month totals replace the weekly sum for the whole month.
+    // The monthly scorecard's April column: month totals replace the weekly sum for the whole month.
     eosSrc = (await q("insert into sheet_sources (business_id, role, label, file_id, file_kind, created_by) values ('sb', 'eos_scorecard', 'EOS', 'TESTeosFILEid0000000000001', 'google_sheet', 't') returning id"))[0].id;
     const r1 = await runSheetSync(eosSrc, "manual", "t", async () => eos(10000) as any);
     expect(r1.outcome).toBe("succeeded");
     const sum = (await call("viewer", "GET", `/business/sb/summary?start=${apr.start}&end=${apr.end}&compare=previous_period`)).body.metrics;
     rev = sum.find((m: any) => m.key === "revenue");
-    expect(rev.value).toMatchObject({ state: "value", value: 9500 });       // All − Little Sunnie − Photostosketches
+    expect(rev.value).toMatchObject({ state: "value", value: 9500 });       // Everything − side brand − second business
     expect(rev.coverage).toMatchObject({ status: "supported", granularity: "month" });
     expect(sum.find((m: any) => m.key === "ad_spend").value).toMatchObject({ state: "value", value: 550 });
     expect(sum.find((m: any) => m.key === "conversion_rate").value).toMatchObject({ state: "value", value: 0.01 });
@@ -165,19 +166,19 @@ describe("calendar-day counting across a month", () => {
     await runSheetSync(eosSrc, "manual", "t", async () => eos(10000, 175) as any);
     expect((await metricValue("sb", "ad_spend", "platform:facebook", apr)).value.value).toBe(175);
 
-    // The Daily Analytics Report: exact figures for any days, Little Sunnie left out.
+    // The daily workbook: exact figures for any days, the side brand left out.
     darSrc = (await q("insert into sheet_sources (business_id, role, label, file_id, file_kind, created_by) values ('sb', 'daily_analytics', 'DAR', 'TESTdarFILEid0000000000001', 'google_sheet', 't') returning id"))[0].id;
     expect((await runSheetSync(darSrc, "manual", "t", async () => dar() as any)).outcome).toBe("succeeded");
     const d13 = { start: "2025-04-01", end: "2025-04-03" };
     expect((await metricValue("sb", "revenue", "all", d13)).value).toMatchObject({ state: "value", value: 100 + 20 + 110 + 30 + 45 + 120 + 80 });
-    expect((await metricValue("sb", "orders", "all", d13)).value.value).toBe(5 + 1 + 6 + 2 + 7 + 1);      // Cratejoy's blank order count adds nothing
+    expect((await metricValue("sb", "orders", "all", d13)).value.value).toBe(5 + 1 + 6 + 2 + 7 + 1);      // Channel C's blank order count adds nothing
     expect((await metricValue("sb", "revenue", "channel:online_store", d13)).value.value).toBe(330);
     expect((await metricValue("p2s", "revenue", "all", d13)).value.value).toBe(65);
     // Day 4 has no figures yet; the whole month still comes from the EOS total.
     expect((await metricValue("sb", "revenue", "all", { start: "2025-04-01", end: "2025-04-04" })).coverage.status).toBe("gaps");
     expect((await metricValue("sb", "revenue", "all", apr)).value.value).toBe(9500);
     const notes = (await q("select tabs_read from sync_runs where sheet_source_id = $1 order by started_at desc limit 1", [darSrc]))[0].tabs_read;
-    expect(JSON.stringify(notes)).toMatch(/2025-04-02: no order count for Cratejoy/);
+    expect(JSON.stringify(notes)).toMatch(/2025-04-02: no order count for Channel C/);
     await runSheetSync(darSrc, "manual", "t", async () => dar(105) as any);
     expect((await metricValue("sb", "revenue", "channel:online_store", d13)).value.value).toBe(335);
   });

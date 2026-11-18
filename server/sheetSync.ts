@@ -6,6 +6,7 @@ import { HttpError } from "./http";
 import { SheetReader, sheetReader, ReadOptions } from "./sheetsReader";
 import { createHash } from "node:crypto";
 import { parseDailyAnalytics, parseEosMonths } from "../shared/scorecardParse";
+import { scorecardLayout } from "./scorecardLayout";
 import { applyPulled } from "./adapters/pullApply";
 import { todayIn, OPERATIONS_TZ, addDays, daysInMonth } from "../shared/dates";
 import { parseAnnualCalendar, parseSeasonalProgram, Sheet, Cell, SOURCE_FIELDS, ParsedWorkbook } from "../shared/calendarParse";
@@ -55,15 +56,16 @@ function readOptions(role: SheetSource["role"]): ReadOptions | undefined {
 }
 
 /**
- * Daily Analytics Report → daily revenue and orders; EOS scorecard → month totals. One submission per business and
+ * Daily workbook → daily revenue and orders; monthly scorecard → month totals. One submission per business and
  * month; a month whose figures changed in the spreadsheet is sent as a correction of the earlier one, an unchanged
  * month writes nothing.
  */
 async function syncFigures(src: SheetSource, sheets: Sheet[], runId: string, actor: string) {
   const today = todayIn(OPERATIONS_TZ);
   const daily = src.role === "daily_analytics";
-  const batches = daily ? parseDailyAnalytics(sheets, { fromYear: FIGURES_FROM_YEAR, through: addDays(today, -1) }) : parseEosMonths(sheets, { fromYear: FIGURES_FROM_YEAR, today });
-  if (!batches.length) throw new HttpError(422, "no_figures", daily ? "No month tabs with daily figures were found (tabs named like \"October 2026\")." : "No finished month columns were found (year tabs with \"TOTAL (MONTH)\" columns).");
+  const layout = scorecardLayout();
+  const batches = daily ? parseDailyAnalytics(sheets, layout, { fromYear: FIGURES_FROM_YEAR, through: addDays(today, -1) }) : parseEosMonths(sheets, layout, { fromYear: FIGURES_FROM_YEAR, today });
+  if (!batches.length) throw new HttpError(422, "no_figures", daily ? "No month tabs with daily figures were found." : "No finished month columns were found.");
   const who = daily ? { sourceId: "sheet.daily_analytics", submitter: `sheet:${src.id}`, submissionSource: "daily_analytics" }
     : { sourceId: "sheet.eos_scorecard", submitter: `sheet:${src.id}`, submissionSource: "eos_scorecard" };
   const receipts: any[] = [];

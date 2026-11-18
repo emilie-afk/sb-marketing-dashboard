@@ -102,3 +102,28 @@ export function listingCheck(runId: string, windowEnd: string, opts: { priceDigi
     corrections: opts.correction ? [{ supersedes_run_id: "demo-check-1", supersedes_finding_key: "f-price", reason: "Rival B price was a sale price; regular price is $11." }] : [],
   };
 }
+
+/** An invented layout for the two figure workbooks (the real layout is a private server setting). */
+export const scorecardLayout = {
+  totals: { sb: "Main business total", p2s: "Second business total" },
+  daily: {
+    end: "^grand total$", excludedSections: ["^side brand$"], p2sSection: "^second business$", reportedRow: "^web store$",
+    channels: [
+      { scope: "channel:online_store", row: "^web store$", label: "Web store" },
+      { scope: "channel:amazon", row: "^marketplace a\\b", label: "Marketplace A" },
+      { scope: "channel:faire", row: "^wholesale\\b", label: "Wholesale" },
+    ],
+  },
+  monthly: {
+    monthTotal: "^month total",
+    sections: [{ key: "rev", heading: "^sales" }, { key: "conv", heading: "^funnel" }, { key: "ads", heading: "^advertising" }],
+    revenueAll: "rev|everything", revenueExcluded: ["rev|side brand"], p2sRevenue: "rev|second business",
+    channels: [
+      { scope: "channel:online_store", row: "rev|web store", label: "Web store" },
+      { scope: "channel:amazon", row: "rev|marketplace a", label: "Marketplace A" },
+      { scope: "channel:faire", row: "rev|wholesale", label: "Wholesale" },
+    ],
+    funnel: [{ metric: "add_to_cart_rate", row: "conv|carts" }, { metric: "checkout_rate", row: "conv|checkouts" }, { metric: "conversion_rate", row: "conv|orders placed" }],
+    adSection: "ads", adPlatformRow: "^(.+?) spend$", adTotal: "ads|ad total", p2sAd: "ads|second business", p2sAdLabel: "Second business ads",
+  },
+};
