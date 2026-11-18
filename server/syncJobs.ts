@@ -17,6 +17,7 @@ import { pullPlantBreakdown, plantBreakdownConfigured, PB_SOURCE_ID } from "./ad
 import { pullGrossProfit, grossProfitConfigured, GP_SOURCE_ID } from "./adapters/grossProfit";
 import { pullCorporateGifting, corporateGiftingConfigured, corporateGiftingHeld, CG_SOURCE_ID } from "./adapters/corporateGifting";
 import { pullTaskTracker, taskTrackerConfigured, TT_SOURCE_ID } from "./adapters/taskTracker";
+import { syncCorporateTasks } from "./corporateTasks";
 import { logServerError, redact } from "./redact";
 
 export const JOB_LIMITS = {
@@ -34,7 +35,13 @@ export const PULLS: Record<PullKind, { sourceId: string; label: string; configur
   plant_breakdown: { sourceId: PB_SOURCE_ID, label: "Plant Revenue Breakdown", configured: plantBreakdownConfigured, run: (a) => pullPlantBreakdown(a) },
   gross_profit: { sourceId: GP_SOURCE_ID, label: "Gross Profit", configured: grossProfitConfigured, run: (a) => pullGrossProfit(a) },
   corporate_gifting: { sourceId: CG_SOURCE_ID, label: "Corporate Gifting", configured: corporateGiftingConfigured, held: corporateGiftingHeld, run: (a) => pullCorporateGifting(a) },
-  task_tracker: { sourceId: TT_SOURCE_ID, label: "Task Tracker", configured: taskTrackerConfigured, run: (a) => pullTaskTracker(a) },
+  // The hourly Task Tracker pull also reads Corporate Gifts task requests and reports delivery back (its own errors are
+  // logged and never change the Task Tracker pull's result).
+  task_tracker: { sourceId: TT_SOURCE_ID, label: "Task Tracker", configured: taskTrackerConfigured, run: async (a) => {
+    const r = await pullTaskTracker(a);
+    await syncCorporateTasks().catch(() => {});
+    return r;
+  } },
 };
 export const pullKindForSource = (sourceId: string) => (Object.entries(PULLS).find(([, p]) => p.sourceId === sourceId)?.[0] ?? null) as PullKind | null;
 

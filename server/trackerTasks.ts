@@ -20,10 +20,11 @@ function item(r: any) {
     recurrence: r.recurrence, occurrence: r.occurrence_date, promotion_id: null, promotion_title: null, file_count: 0, links: [],
     completed_at: r.completed_on, brand_name: r.brand_name, brand_archived: r.brand_archived,
     source: "tracker", read_only: true, open_url: openUrl(r.task_id), version: null,
+    category: r.corporate ? "Corporate Gifts" : null,
   };
 }
 
-const COLS = `source_instance, record_id, task_id, kind, business_id, title, task_type, brand_name, brand_archived, assignee_name, assignee_archived, recurrence,
+const COLS = `source_instance, record_id, task_id, exists (select 1 from corporate_task_drafts cg where cg.tracker_task_id = tracker_task_records.task_id) as corporate, kind, business_id, title, task_type, brand_name, brand_archived, assignee_name, assignee_archived, recurrence,
               to_char(due_date,'YYYY-MM-DD') due_date, to_char(occurrence_date,'YYYY-MM-DD') occurrence_date, status, to_char(completed_on,'YYYY-MM-DD') completed_on`;
 
 /** Task list: one-time tasks (all) and occurrences inside the window. Never series-level completion. */
