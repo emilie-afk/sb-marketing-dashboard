@@ -149,14 +149,23 @@ function Checkoffs() {
     setSel(new Set(failed.map((x: any) => x.id)));   // failed ones stay selected for a retry
     return `${r.results.length - failed.length} marked done${failed.length ? `; ${failed.length} failed (${failed[0].message ?? "error"}) and stay selected` : ""}.`;
   });
+  const who = s.data?.follow_up_name ?? "Marketing";
+  const followUp = (list: string[]) => run(async () => {
+    const r = await api("/review/corporate-checkoffs/follow-up", { method: "POST", json: { ids: list } });
+    const failed = r.results.filter((x: any) => x.outcome === "failed");
+    setSel(new Set(failed.map((x: any) => x.id)));
+    window.dispatchEvent(new Event("corporate-tasks-changed"));
+    return `${r.results.length - failed.length} assigned to ${who}: now drafts above, ready to send to Task Tracker${failed.length ? `; ${failed.length} failed (${failed[0].message ?? "error"}) and stay selected` : ""}.`;
+  });
   const parts = (it: any) => (it.partners ?? []).map((p: any, n: number) => <span key={n}>{n > 0 && ", "}<a href={p.url} target="_blank" rel="noopener noreferrer">{p.name}</a></span>);
   return <div style={{ marginTop: 20 }}>
     <div className="toolbar"><b>Check-off items</b>
       <label>Show <select value={status} onChange={(e) => { setStatus(e.target.value); setSel(new Set()); }}><option value="open">Open</option><option value="done">Done</option><option value="all">All</option></select></label>
       {openChecks.length > 0 && <><button className="btn small" onClick={() => setSel(ids.length === openChecks.length ? new Set() : new Set(openChecks.map((i) => i.id)))}>{ids.length === openChecks.length ? "Clear" : "Select all"}</button>
-        <button className="btn small primary" disabled={busy || !ids.length} onClick={() => markDone(ids)}>Mark done ({ids.length})</button></>}
+        <button className="btn small primary" disabled={busy || !ids.length} onClick={() => markDone(ids)}>Mark done ({ids.length})</button>
+        <button className="btn small" disabled={busy || !ids.length} onClick={() => followUp(ids)}>Follow up: assign to {who} ({ids.length})</button></>}
     </div>
-    <p className="sub">Corporate Gifts work owned outside Marketing (including partners). No Task Tracker task is created; marking one done here also marks it done in Corporate Gifts, and the weekly report lists it once.</p>
+    <p className="sub">Corporate Gifts work not owned by the Marketing team, with the names from Slack. Tick items off (one or in bulk; also done in Corporate Gifts, and the weekly report lists each once), or use Follow up to assign them to {who}: they become drafts above, sent to Task Tracker like any Marketing task.</p>
     {msg && <div className="notice" role="status">{msg}</div>}
     {routing.length > 0 && <><h4>Needs routing ({routing.length})</h4><div className="table-wrap"><table><thead><tr><th>Action</th><th>Marketplaces</th><th>Why</th><th /></tr></thead>
       <tbody>{routing.map((it) => <tr key={it.id}><td><b>{it.title}</b>{it.owner && <div className="sub">Owner in Slack: {it.owner}</div>}</td><td>{parts(it)}</td><td className="sub">{it.route_reason}</td>
@@ -168,7 +177,8 @@ function Checkoffs() {
           <td>{it.state === "open" && <input type="checkbox" aria-label={`Select ${it.title}`} checked={sel.has(it.id)} onChange={() => setSel((x) => { const n = new Set(x); n.has(it.id) ? n.delete(it.id) : n.add(it.id); return n; })} />}</td>
           <td><b>{it.title}</b></td><td>{parts(it)}</td><td>{it.owner ?? <span className="sub">Not set</span>}</td><td>{fmtDate(it.due_date) || <span className="sub">—</span>}</td>
           <td>{it.state === "done" ? <span className="chip">Resolved {fmtDate(it.completed_on)}{it.completion_source === "slack" ? " (Slack)" : ""}</span> : it.state === "closed" ? <span className="chip muted">Closed</span> : <span className="chip warn">Open</span>}</td>
-          <td>{it.state === "open" && <button className="btn small" disabled={busy} onClick={() => markDone([it.id])}>Resolve</button>}</td></tr>)}</tbody></table></div>}</Async>
+          <td>{it.state === "open" && <><button className="btn small" disabled={busy} onClick={() => markDone([it.id])}>Resolve</button>{" "}
+            <button className="btn small" disabled={busy} onClick={() => followUp([it.id])}>Follow up: assign to {who}</button></>}</td></tr>)}</tbody></table></div>}</Async>
   </div>;
 }
 

@@ -3,7 +3,7 @@ import type { Router } from "../router";
 import { badRequest, readJson } from "../http";
 import { z } from "zod";
 import { assertReviewer, pendingCount, listSuggestions, getSuggestion, editSuggestion, editSchema, previewSuggestion, addToPlanSchema, addToPlan, planChoices, returnToReview, createFromSuggestion, dismissSuggestion, refreshSuggestion, resolveSuggestion, classifySuggestion, classifySchema } from "../review";
-import { pendingCorporateCount, listDrafts, editDraft, draftEditSchema, bulkAssign, bulkAssignSchema, sendDrafts, dismissDraft, refreshDrafts, getDraft, resolveDraft, resolveSchema, listCheckoffs, markCheckoffsDone, markDoneSchema, routeCheckoff, routeSchema } from "../corporateTasks";
+import { pendingCorporateCount, listDrafts, editDraft, draftEditSchema, bulkAssign, bulkAssignSchema, sendDrafts, dismissDraft, refreshDrafts, getDraft, resolveDraft, resolveSchema, listCheckoffs, markCheckoffsDone, markDoneSchema, routeCheckoff, routeSchema, followUpCheckoffs, followUpSchema } from "../corporateTasks";
 
 const version = z.object({ version: z.number().int().min(1) }).strict();
 
@@ -115,6 +115,12 @@ export function registerReview(r: Router) {
     const v = markDoneSchema.safeParse(await readJson(req));
     if (!v.success) throw badRequest("Choose 1 to 100 items.");
     return markCheckoffsDone(session, v.data);
+  }, "viewer");
+  r.post("/review/corporate-checkoffs/follow-up", async ({ req, session }) => {
+    assertReviewer(session);
+    const v = followUpSchema.safeParse(await readJson(req));
+    if (!v.success) throw badRequest("Choose 1 to 100 items.");
+    return followUpCheckoffs(session, v.data);
   }, "viewer");
   r.post("/review/corporate-checkoffs/:id/route", async ({ req, params, session }) => {
     assertReviewer(session);
