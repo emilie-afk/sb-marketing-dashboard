@@ -170,9 +170,17 @@ const cgTaskSchema = z.object({
   due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
   slack_status: z.enum(["open", "done", "cancelled"]),
   content_version: z.number().int().min(1),
-  delivery_status: z.enum(["pending", "in_review", "delivered", "failed", "dismissed", "resolved"]),
+  delivery_status: z.enum(["pending", "in_review", "sending", "delivered", "failed", "dismissed", "resolved"]),
   delivered_version: z.number().int().nullable(),
   tracker_task_id: z.string().max(80).nullable(),
+  // Route by owner: only "marketing" requests become drafts. Older Corporate Gifts versions send neither field.
+  route: z.enum(["marketing", "checkoff", "review"]).default("marketing"),
+  resolution: z.object({
+    state: z.enum(["requested", "resolved"]),
+    completed_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+    source: z.enum(["manual", "slack"]).nullable(),
+    by: z.string().max(120).nullable(),
+  }).nullable().default(null),
   // Links must point at the Corporate Gifting app itself (its configured origin).
   partners: z.array(z.object({ name: z.string().min(1).max(120), url: z.string().url().max(500).refine((u) => {
     try { return new URL(u).origin === originOf(process.env.CORPORATE_GIFTING_API_URL); } catch { return false; }
@@ -182,20 +190,33 @@ export type CgTask = z.infer<typeof cgTaskSchema>;
 const cgTasksPage = z.object({ ok: z.literal(true), schema_version: z.literal(1), as_of: z.string(), tasks: z.array(z.unknown()).max(200),
   capabilities: z.array(z.string().max(40)).max(20).optional() });
 
-export async function fetchCorporateTasks(since: string | null): Promise<{ as_of: string; tasks: CgTask[]; rejected: number; resolvedSupported: boolean }> {
+/**
+ * Reads the request feed in its current form (v=2: every route, resolve requests and "sending"). A Corporate Gifts build
+ * that doesn't know v=2 refuses it (400): then the earlier form is read, and its capabilities say what it accepts.
+ */
+export async function fetchCorporateTasks(since: string | null): Promise<{ as_of: string; tasks: CgTask[]; rejected: number; resolvedSupported: boolean; routingSupported: boolean }> {
   if (!corporateGiftingCredentials()) throw new HttpError(503, "not_configured", "Corporate Gifting is not connected.");
   const origin = originOf(process.env.CORPORATE_GIFTING_API_URL)!;
   const headers = { authorization: `Bearer ${process.env.CORPORATE_GIFTING_REPORTING_SECRET}` };
-  const page = cgTasksPage.parse(await getJson(origin, `/api/reporting/v1/corporate-tasks${since ? `?since=${encodeURIComponent(since)}` : ""}`, headers, "Corporate Gifting tasks"));
+  const qs = (v2: boolean) => { const p = new URLSearchParams(); if (since) p.set("since", since); if (v2) p.set("v", "2"); const x = p.toString(); return x ? `?${x}` : ""; };
+  let raw: unknown;
+  try { raw = await getJson(origin, `/api/reporting/v1/corporate-tasks${qs(true)}`, headers, "Corporate Gifting tasks"); }
+  catch (e) {
+    if (!(e instanceof HttpError && e.code === "source_failed" && /returned 400\.$/.test(e.message))) throw e;
+    raw = await getJson(origin, `/api/reporting/v1/corporate-tasks${qs(false)}`, headers, "Corporate Gifting tasks");
+  }
+  const page = cgTasksPage.parse(raw);
   const tasks: CgTask[] = [];
   let rejected = 0;
   for (const t of page.tasks) { const r = cgTaskSchema.safeParse(t); if (r.success) tasks.push(r.data); else rejected++; }
-  return { as_of: page.as_of, tasks, rejected, resolvedSupported: (page.capabilities ?? []).includes("resolved") };
+  const caps = page.capabilities ?? [];
+  return { as_of: page.as_of, tasks, rejected, resolvedSupported: caps.includes("resolved"), routingSupported: caps.includes("routing") };
 }
 
 export type TaskReceipt = {
   id: string; content_version: number; state: "in_review" | "delivered" | "failed" | "dismissed" | "resolved";
-  tracker?: { task_id: string; status: "open" | "done" | "deleted"; assignee?: string | null; due_date?: string | null; open_url?: string | null };
+  resolved_by?: string; completed_on?: string; resolve_error?: string;
+  tracker?: { task_id: string; status: "open" | "done" | "deleted"; assignee?: string | null; due_date?: string | null; open_url?: string | null; completed_on?: string | null };
   error?: string;
 };
 export async function sendTaskReceipts(receipts: TaskReceipt[]) {
@@ -206,4 +227,67 @@ export async function sendTaskReceipts(receipts: TaskReceipt[]) {
   const r = await sendJson(origin, "POST", "/api/reporting/v1/corporate-task-receipts", headers, { receipts }, "Corporate Gifting receipts");
   if (r.status !== 200) throw new HttpError(502, "receipts_failed", `Corporate Gifting did not accept the delivery receipts (${r.status}).`);
   return r.body;
+}
+
+// Check-off items (Corporate Gifts work owned outside Marketing) and items waiting for a routing decision. Corporate
+// Gifts is the source; the dashboard keeps a copy for its Corporate Gifts view and the weekly report.
+const linkToCg = z.string().url().max(500).refine((u) => { try { return new URL(u).origin === originOf(process.env.CORPORATE_GIFTING_API_URL); } catch { return false; } }, "must link to the Corporate Gifting app");
+const checkoffSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string().min(1).max(300),
+  route: z.enum(["checkoff", "review", "marketing"]),
+  route_reason: z.string().max(200).nullable(),
+  owner: z.string().max(120).nullable(),
+  owner_team: z.enum(["marketing", "outside", "external"]).nullable(),
+  due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+  state: z.enum(["open", "done", "closed"]),
+  completed_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+  completion_source: z.enum(["manual", "slack"]).nullable(),
+  resolved_by: z.string().max(120).nullable(),
+  resolved_at: z.string().nullable(),
+  evidence_count: z.number().int().min(0),
+  version: z.number().int().min(1),
+  updated_at: z.string(),
+  listed: z.boolean(),                 // false: the item is not (or no longer) on the check-off list
+  partners: z.array(z.object({ name: z.string().min(1).max(120), url: linkToCg })).max(20),
+}).refine((x) => x.state !== "done" || !!x.completed_on, "done needs completed_on");
+export type CgCheckoff = z.infer<typeof checkoffSchema>;
+const ISO = z.string().max(40).refine((v) => !Number.isNaN(Date.parse(v)), "time");
+const cursorSchema = z.object({ after: ISO, after_id: z.string().uuid() });
+export type FeedCursor = z.infer<typeof cursorSchema>;
+const checkoffPage = z.object({ ok: z.literal(true), schema_version: z.literal(2), has_more: z.boolean(), next: cursorSchema.nullable(), items: z.array(z.unknown()).max(200) });
+
+/** One page of the change feed after `cursor` (null: from the start). */
+export async function fetchCheckoffs(cursor: FeedCursor | null): Promise<{ items: CgCheckoff[]; ids: string[]; rejected: number; next: FeedCursor | null; has_more: boolean }> {
+  if (!corporateGiftingCredentials()) throw new HttpError(503, "not_configured", "Corporate Gifting is not connected.");
+  const origin = originOf(process.env.CORPORATE_GIFTING_API_URL)!;
+  const headers = { authorization: `Bearer ${process.env.CORPORATE_GIFTING_REPORTING_SECRET}` };
+  const qs = cursor ? `?after=${encodeURIComponent(cursor.after)}&after_id=${cursor.after_id}` : "";
+  const page = checkoffPage.parse(await getJson(origin, `/api/reporting/v1/corporate-checkoffs${qs}`, headers, "Corporate Gifting check-offs"));
+  const items: CgCheckoff[] = [];
+  const ids: string[] = [];
+  let rejected = 0;
+  for (const x of page.items) {
+    const r = checkoffSchema.safeParse(x);
+    if (r.success) items.push(r.data); else rejected++;
+    if (typeof (x as any)?.id === "string") ids.push((x as any).id);
+  }
+  return { items, ids, rejected, next: page.next, has_more: page.has_more };
+}
+
+export type TaskAction = { id: string; action: "resolve" | "route" | "claim" | "release"; route?: "marketing" | "checkoff"; by: string; completed_on?: string | null; version?: number; content_version?: number };
+export type TaskActionResult = { id: string; outcome: string; message?: string; state?: string | null; completed_on?: string | null };
+/** Resolve / Mark done and routing decisions, applied in Corporate Gifts (each on its own). */
+export async function sendTaskActions(actions: TaskAction[]): Promise<TaskActionResult[]> {
+  if (!corporateGiftingCredentials()) throw new HttpError(503, "not_configured", "Corporate Gifting is not connected.");
+  const origin = originOf(process.env.CORPORATE_GIFTING_API_URL)!;
+  const headers = { authorization: `Bearer ${process.env.CORPORATE_GIFTING_REPORTING_SECRET}` };
+  const r = await sendJson(origin, "POST", "/api/reporting/v1/corporate-task-actions", headers, { actions }, "Corporate Gifting actions");
+  // A 4xx answer is a refusal (nothing was applied); anything else (5xx, no answer, bad body) leaves the outcome unknown.
+  if (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429) throw new HttpError(502, "actions_rejected", `Corporate Gifting refused the change (${r.status}).`);
+  if (r.status !== 200 || !Array.isArray(r.body?.results)) throw new HttpError(502, "actions_failed", `Corporate Gifting did not apply the change (${r.status}).`);
+  return r.body.results.filter((x: any) => typeof x?.id === "string" && typeof x?.outcome === "string").map((x: any) => ({
+    id: x.id, outcome: String(x.outcome).slice(0, 40), message: typeof x.message === "string" ? x.message.slice(0, 300) : undefined,
+    state: typeof x.state === "string" ? x.state : null, completed_on: typeof x.completed_on === "string" ? x.completed_on : null,
+  }));
 }

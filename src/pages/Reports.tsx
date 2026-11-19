@@ -59,6 +59,10 @@ function ReportView({ id, role }: { id: string; role: string }) {
       <Section title="Promotions" sub="Promotions whose dates overlap this period.">
         <PromotionList items={[...c.promotions.current, ...c.promotions.upcoming]} /></Section>
       <Section title="Activities" sub="Activities reported for this period. A week running past the period counts by the share of its days inside it.">{c.activities.length ? <ActivityList items={c.activities} /> : <div className="state">None reported.</div>}</Section>
+      {c.corporate_gifts && <Section title="Corporate Gifts → Completed" sub="Check-off items completed this week (work owned outside Marketing), each once. Marketing tasks are counted through Task Tracker.">
+        {c.corporate_gifts.completed.length ? <div className="table-wrap"><table><thead><tr><th>Completed</th><th>Action</th><th>Marketplaces</th><th>Owner</th><th>How</th></tr></thead>
+          <tbody>{c.corporate_gifts.completed.map((x: any) => <tr key={x.id}><td>{x.completed_on}</td><td>{x.title}</td><td>{x.marketplaces.join(", ")}</td><td>{x.owner ?? "—"}</td><td>{x.source}{x.kind !== "Check-off" ? ` · ${x.kind}` : ""}</td></tr>)}</tbody></table></div>
+          : <div className="state">No check-off items completed in this period.</div>}</Section>}
       {c.products && c.products.vendors?.length > 0 && <Section title="Product and vendor details" sub={c.products.scopeLabel}><VendorTable vendors={c.products.vendors.slice(0, 10)} /></Section>}
     </>}
     <Section title="Files" sub="Original images, PDFs, spreadsheets and report packs. Images are attached as files only; they never feed charts.">
