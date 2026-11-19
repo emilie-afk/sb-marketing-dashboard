@@ -661,7 +661,38 @@ export async function listCheckoffs(s: Session, status: string) {
   const rows = await query<any>(`select *, to_char(due_date,'YYYY-MM-DD') due_s, to_char(completed_on,'YYYY-MM-DD') done_s from corporate_checkoffs ${where}
                                   order by (route = 'review') desc, state, due_date nulls last, title limit 300`);
   return { items: rows.map((x) => ({ id: x.id, title: x.title, route: x.route, route_reason: x.route_reason, owner: x.owner, owner_team: x.owner_team, partners: x.partners,
-    due_date: x.due_s, state: x.state, completed_on: x.done_s, completion_source: x.completion_source, resolved_by: x.resolved_by, version: x.cg_version })) };
+    due_date: x.due_s, state: x.state, completed_on: x.done_s, completion_source: x.completion_source, resolved_by: x.resolved_by, version: x.cg_version })),
+    // Who follows up an item assigned to Marketing (the drafts' default assignee).
+    follow_up_name: followUpName() };
+}
+const followUpName = () => { const n = (process.env.CORPORATE_TASK_DEFAULT_ASSIGNEE ?? "").trim(); return n ? n.charAt(0).toUpperCase() + n.slice(1) : "Marketing"; };
+
+export const followUpSchema = z.object({ ids: z.array(z.string().uuid()).min(1).max(100) }).strict();
+/**
+ * Follow up: assign check-off items to Marketing (one or many), applied in Corporate Gifts. Each becomes a Marketing
+ * draft here with the default assignee, ready to send to Task Tracker. Each item on its own: failed ones can be retried.
+ */
+export async function followUpCheckoffs(s: Session, v: z.infer<typeof followUpSchema>) {
+  assertReviewer(s);
+  const ids = [...new Set(v.ids)];
+  const known = new Map((await query<any>("select id, state from corporate_checkoffs where listed and id = any($1::uuid[])", [ids])).map((x) => [x.id, x]));
+  const results: { id: string; outcome: string; message?: string }[] = [];
+  const send = ids.filter((id) => {
+    const x = known.get(id);
+    if (!x) { results.push({ id, outcome: "failed", message: "Not found; refresh first." }); return false; }
+    if (x.state !== "open") { results.push({ id, outcome: "failed", message: "Already closed." }); return false; }
+    return true;
+  });
+  if (send.length) {
+    try {
+      results.push(...(await sendTaskActions(send.map((id) => ({ id, action: "route" as const, route: "marketing" as const, by: s.email })))).map((r) => ({ id: r.id, outcome: r.outcome === "routed" ? "assigned" : "failed", ...(r.outcome === "routed" ? {} : { message: r.message ?? "Corporate Gifts did not apply it." }) })));
+    } catch (e: any) {
+      results.push(...send.map((id) => ({ id, outcome: "failed", message: e instanceof HttpError ? e.message : "Corporate Gifting could not be reached." })));
+    }
+    await syncCheckoffs().catch((e) => logServerError("corporate-checkoffs-sync", e));
+    await syncCorporateTasks();
+  }
+  return { results };
 }
 
 export const markDoneSchema = z.object({ ids: z.array(z.string().uuid()).min(1).max(100), completed_on: z.string().refine(isIsoDate, "must be a date").nullable().optional() }).strict();

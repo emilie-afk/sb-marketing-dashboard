@@ -25,11 +25,11 @@ Task Tracker tasks, so they appear in **Marketing Tasks** with a **Corporate Gif
    Tracker task id, `failed`, `dismissed`); a failed report is sent again on the next sync. Work marked done in Slack
    (or dismissed in Corporate Gifts) before it was sent is dismissed here.
 
-6. **Routing.** Corporate Gifts routes each request by its owner. Only Marketing tasks become drafts here. Work owned
-   outside Marketing is a **check-off item**, and an item without a clear owner shows under **Needs routing** with
-   **Assign as Marketing task** / **Track as check-off**. Both lists are in the same Corporate Gifts view, and every
-   action is applied in Corporate Gifts. A draft whose request is routed away disappears from the queue, and comes back
-   if it is routed to Marketing again. The check-off list follows the Corporate Gifts change feed; each row is applied
+6. **Routing.** Corporate Gifts routes each request by its owner. Only tasks owned by a Marketing team member become
+   drafts here. Everything else is a **check-off item** with the names from Slack, in the same Corporate Gifts view:
+   **Mark done** (one or in bulk) or **Follow up: assign to <default assignee>** (one or in bulk), which makes them
+   Marketing drafts here with the default assignee. Every action is applied in Corporate Gifts. A draft whose request is
+   routed away disappears from the queue, and comes back if it is routed to Marketing again. The check-off list follows the Corporate Gifts change feed; each row is applied
    only if it is not older than the stored one, so overlapping refreshes can't remove or bring back an item out of order.
    Before a draft is sent it is claimed in Corporate Gifts at the version it was built from; a refused claim sends
    nothing. If Corporate Gifts doesn't answer, nothing is sent to Task Tracker and the claim is released there (right

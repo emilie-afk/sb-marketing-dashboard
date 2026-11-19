@@ -439,7 +439,7 @@ describe("upgrade from the schema before 016 (015's shared resolved status, with
     check.delivery_status = "resolved";
     const ins = (i: Item, extra: string) => pool.query(
       `insert into corporate_task_drafts (id, cg_title, cg_delivery_status, cg_content_version, title, tracker_brand_id, tracker_brand_name, tracker_assignee_id, tracker_assignee_name, due_date, partners)
-       values ($1, $2, $3, 1, $2, $4, 'Succulents Box', $5, 'Demo Staff', '2026-12-04', $6)`, [i.id, i.title, i.delivery_status, SB_BRAND, STAFF, JSON.stringify(partners)]).then(() => extra && pool.query(extra, [i.id]));
+       values ($1, $2, $3, 1, $2, $4, 'Succulents Box', $5, 'Demo Staff', '2026-12-04', $6)`, [i.id, i.title, i.delivery_status, SB_BRAND, STAFF, JSON.stringify(partners)]).then(async () => { if (extra) await pool.query(extra, [i.id]); });
     await ins(resolvedHere, "update corporate_task_drafts set status = 'resolved', resolved_in = 'dashboard', reviewed_at = '2026-11-15T02:00:00Z', receipt_due = false, receipt_state = 'resolved' where id = $1");
     await ins(resolvedCg, "update corporate_task_drafts set status = 'resolved', resolved_in = 'corporate_gifts', reviewed_at = '2026-11-16T01:00:00Z', receipt_due = false, receipt_state = 'resolved' where id = $1");
     await ins(open, "");
@@ -494,5 +494,24 @@ describe("upgrade from the schema before 016 (015's shared resolved status, with
     expect(r.body).toMatchObject({ outcome: "complete", draft: { resolution: { state: "resolved" }, task: { status: "done" } } });
     expect(tracker.completes).toBe(1);
     expect(cg.receipts.filter((x) => x.id === sent.id).at(-1)).toMatchObject({ state: "delivered", tracker: { status: "done" } });
+  });
+});
+
+describe("follow up: assign check-off items to Marketing", () => {
+  it("assigns one or many in Corporate Gifts; each becomes one draft here; closed items are reported", async () => {
+    const a = add({ route: "checkoff", title: "Fictional follow-up A", owner_hint: "Example Outside Person" });
+    const b = add({ route: "checkoff", title: "Fictional follow-up B", owner_hint: "Example Outside Person" });
+    const c = add({ route: "checkoff", title: "Fictional follow-up C" });
+    await syncCorporateTasks();
+    expect((await checks("open")).map((x) => x.id).sort()).toEqual([a.id, b.id, c.id].sort());
+    expect((await req("GET", "/review/corporate-checkoffs?status=open")).body.follow_up_name).toBe("Demo");
+    await req("POST", "/review/corporate-checkoffs/mark-done", { ids: [c.id] });
+    const r = await req("POST", "/review/corporate-checkoffs/follow-up", { ids: [a.id, b.id, c.id] });
+    expect(Object.fromEntries(r.body.results.map((x: any) => [x.id, x.outcome]))).toEqual({ [a.id]: "assigned", [b.id]: "assigned", [c.id]: "failed" });
+    expect((await checks("open")).map((x) => x.id)).toEqual([]);
+    const ds = (await drafts()).filter((d) => [a.id, b.id].includes(d.id));
+    expect(ds).toHaveLength(2);
+    expect(ds.every((d) => d.status === "pending" && d.fields.assignee?.name === "Demo Staff")).toBe(true);
+    expect(cg.actions.filter((x) => x.action === "route").map((x) => x.id).sort()).toEqual([a.id, b.id].sort());
   });
 });
