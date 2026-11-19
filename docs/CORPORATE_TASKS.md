@@ -21,6 +21,10 @@ Task Tracker tasks, so they appear in **Marketing Tasks** with a **Corporate Gif
    Gifts links, the Slack owner's name), brand, assignee and due date. Sending again never creates a duplicate.
 4. **After delivery** Task Tracker owns the task. A newer due date from Corporate Gifts is applied with the version
    check (never to a completed task); nothing else is changed.
+5. **Receipts.** Each state change is reported back to Corporate Gifts (`in_review`, `delivered` with the Task
+   Tracker task id, `failed`, `dismissed`); a failed report is sent again on the next sync. Work marked done in Slack
+   (or dismissed in Corporate Gifts) before it was sent is dismissed here.
+
 6. **Resolved, shared with Corporate Gifts.** Resolving in either app closes the request in both after the next sync:
    resolved here is reported as `resolved`; resolved in Corporate Gifts arrives in the feed and closes the draft here
    ("Resolved in Corporate Gifts"). Repeated clicks, stale forms (version check), rescans and stale receipts never
@@ -29,11 +33,29 @@ Task Tracker tasks, so they appear in **Marketing Tasks** with a **Corporate Gif
    link; completion belongs to that task), and an unsettled send is refused until Retry settles it. A Corporate Gifts
    resolution waits for the same check. The dashboard sends `resolved` only once the feed advertises
    `capabilities: ["resolved"]` (Corporate Gifts migration 008); until then it holds those receipts back.
-5. **Receipts.** Each state change is reported back to Corporate Gifts (`in_review`, `delivered` with the Task
-   Tracker task id, `failed`, `dismissed`); a failed report is sent again on the next sync. Work marked done in Slack
-   (or dismissed in Corporate Gifts) before it was sent is dismissed here.
+7. **Routing.** Corporate Gifts routes each request by its owner. Only Marketing tasks become drafts here. Work owned
+   outside Marketing is a **check-off item**, and an item without a clear owner shows under **Needs routing** with
+   **Assign as Marketing task** / **Track as check-off**. Both lists are in the same Corporate Gifts view, and every
+   action is applied in Corporate Gifts. A draft whose request is routed away disappears from the queue, and comes back
+   if it is routed to Marketing again. The check-off list follows the Corporate Gifts change feed; each row is applied
+   only if it is not older than the stored one, so overlapping refreshes can't remove or bring back an item out of order.
+   Before a draft is sent it is claimed in Corporate Gifts at the version it was built from; a refused claim sends
+   nothing. If Corporate Gifts doesn't answer, nothing is sent to Task Tracker and the claim is released there (right
+   away, or on the next sync), before the draft can be sent again; a Resolve that waited for it then closes it.
+8. **Resolve / Mark done.** Works the same in both apps. A draft not sent yet (or a check-off item) gets the shared
+   status **Resolved** (see 6) and can no longer be sent. A task already in Task Tracker has **Mark done**
+   instead: it is completed there through Task Tracker's own completion rules
+   (`POST /api/planning/v1/tasks/<key>/complete`) and shows done once Task Tracker confirms. A failure is shown and retried on the next sync. Check-off items have
+   **Resolve** and bulk **Mark done**; failed items stay selected for a retry. Repeating any of these never completes
+   anything twice.
+9. **Weekly report.** Corporate Gifts → Completed lists each check-off item (and each draft resolved before sending)
+   once, in the week of its completion date. Marketing tasks are still counted through Task Tracker.
 
-Migration `015_occasion_planning.sql` adds the `resolved` status (rollback turns resolved drafts into dismissed ones).
+Migration `015_occasion_planning.sql` adds the shared `resolved` status. Migration `016_corporate_resolution.sql`
+(rollback `db/rollback/016_corporate_resolution.down.sql`) adds routing, completion records and the
+`corporate_checkoffs` copy. It requires Corporate Gifts with migration 009 (the `corporate-checkoffs` and
+`corporate-task-actions` routes) and Task Tracker with the planning `complete` route.
+
 Migration `014_corporate_tasks.sql`; rollback `db/rollback/014_corporate_tasks.down.sql` (tasks already in Task Tracker
 stay there). Requires Corporate Gifts with migration 007 (the `corporate-tasks` and `corporate-task-receipts`
 reporting routes) and the existing Task Tracker planning credential.

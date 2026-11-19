@@ -78,6 +78,20 @@ export async function promotionsInPeriod(b: string | null, start: string, end: s
       order by p.start_date`, [b, start, end]);
 }
 
+/**
+ * Corporate Gifts → Completed: check-off items (work owned outside Marketing, and drafts resolved before sending)
+ * completed in the period, each once (one row per Corporate Gifts item, whichever app or Slack channel completed it).
+ * Marketing tasks are reported through Task Tracker as before, so the same work never appears twice.
+ */
+export async function corporateCompletedInPeriod(b: string | null, start: string, end: string) {
+  if (b && b !== "sb") return null;
+  const items = await query<any>(
+    `select id, title, owner, partners, to_char(completed_on,'YYYY-MM-DD') completed_on, completion_source, route
+       from corporate_checkoffs where listed and state = 'done' and completed_on between $1::date and $2::date order by completed_on, title`, [start, end]);
+  return { completed: items.map((x) => ({ id: x.id, title: x.title, owner: x.owner, marketplaces: (x.partners ?? []).map((p: any) => p.name),
+    completed_on: x.completed_on, source: x.completion_source === "slack" ? "Slack confirmation" : "Checked off", kind: x.route === "marketing" ? "Resolved before sending" : "Check-off" })) };
+}
+
 /** Freezes the report content for exactly its period, with the import runs it used. */
 export async function buildSnapshot(b: string | null, start: string, end: string) {
   const range = { start, end };
@@ -99,6 +113,7 @@ export async function buildSnapshot(b: string | null, start: string, end: string
       promotions: { current: await promotionsInPeriod(b, start, end), upcoming: [], note: "Promotions whose dates overlap this period. Dates do not prove a launch; see execution status." },
       activities: activities.map(({ import_run_id, ...a }: any) => a),
       products: !b || b === "sb" ? await productsAndVendors("sb", range, "previous_period") : null,
+      corporate_gifts: await corporateCompletedInPeriod(b, start, end),
     },
     runs: [...runIds] as string[],
   };

@@ -41,6 +41,19 @@ async function fakeFetch(url: string, init: any): Promise<Response> {
       return res(200, { ok: true, schema_version: 1, source: "sb-corporate-gifts", id: "cg:corporate-tasks", as_of: new Date().toISOString(), tasks: [...tasks, { id: "not-a-task" }],
         ...(cg.caps ? { capabilities: ["resolved"] } : {}) });
     }
+    if (u.pathname === "/api/reporting/v1/corporate-task-actions" && init.method === "POST") {
+      // The delivery claim (Corporate Gifts' rules: current, open, not changed since the dashboard read it).
+      const b = JSON.parse(init.body);
+      return res(200, { ok: true, results: b.actions.map((a: any) => {
+        const t = cg.tasks.get(a.id);
+        if (!t) return { id: a.id, outcome: "not_found" };
+        if (["delivered", "sending"].includes(t.delivery_status)) return { id: a.id, outcome: "claimed" };
+        if (t.slack_status !== "open" || t.delivery_status === "dismissed") return { id: a.id, outcome: "closed", message: "Closed in Corporate Gifts." };
+        if (t.content_version !== a.content_version) return { id: a.id, outcome: "stale", message: "Changed in Corporate Gifts since the last refresh." };
+        t.delivery_status = "sending";
+        return { id: a.id, outcome: "claimed" };
+      }) });
+    }
     if (u.pathname === "/api/reporting/v1/corporate-task-receipts" && init.method === "POST") {
       if (cg.failReceipts > 0) { cg.failReceipts--; return res(503, { error: { code: "down" } }); }
       const b = JSON.parse(init.body);
@@ -260,7 +273,7 @@ describe("in-place status actions", () => {
     expect(cg.receipts.filter((x) => x.id === a.id).at(-1)).toMatchObject({ state: "resolved" });
     // Recorded as reported (not sent again on every sync).
     expect((await q("select receipt_due, receipt_state from corporate_task_drafts where id = $1", [a.id]))[0]).toEqual({ receipt_due: false, receipt_state: "resolved" });
-    expect((await owner("POST", `/review/corporate/${a.id}/resolve`, { version: r.body.draft.version })).status).toBe(409);
+    expect((await owner("POST", `/review/corporate/${a.id}/resolve`, { version: r.body.draft.version })).body.outcome).toBe("already");   // repeat: harmless
     a.content_version = 2; a.title = "Confirm Demo Market India's spring sizes (updated)";
     await syncCorporateTasks();
     expect((await item(a.id)).status).toBe("resolved");
