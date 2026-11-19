@@ -96,3 +96,14 @@ export async function changeTrackerDueDate(key: string, due_date: string, expect
   if (r.status === 404) return { kind: "missing" };
   throw failure(r.status, r.body, "Task Tracker did not change the due date.");
 }
+
+export type CompleteOutcome = { kind: "done"; task: TrackerTask } | { kind: "refused"; code: string; message: string; task: TrackerTask | null } | { kind: "missing" };
+/** Marks a task done in Task Tracker with its own completion rules (Resolve). Repeating it keeps the first completion. */
+export async function completeTrackerTask(key: string): Promise<CompleteOutcome> {
+  const c = cfg();
+  const r = await sendJson(c.origin, "POST", `/api/planning/v1/tasks/${encodeURIComponent(key)}/complete`, c.headers, {}, LABEL, PLANNING_TIMEOUT_MS);
+  if (r.status === 200 && validTask(r.body?.task)) return { kind: "done", task: r.body.task };
+  if (r.status === 404) return { kind: "missing" };
+  if (r.status === 409 || r.status === 422) return { kind: "refused", code: r.body?.error?.code ?? "refused", message: r.body?.error?.message ?? "Task Tracker refused the completion.", task: validTask(r.body?.error?.details?.task) ? r.body.error.details.task : null };
+  throw failure(r.status, r.body, "Task Tracker did not complete the task.");
+}

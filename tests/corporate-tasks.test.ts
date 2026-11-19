@@ -41,6 +41,19 @@ async function fakeFetch(url: string, init: any): Promise<Response> {
       return res(200, { ok: true, schema_version: 1, source: "sb-corporate-gifts", id: "cg:corporate-tasks", as_of: new Date().toISOString(), tasks: [...tasks, { id: "not-a-task" }],
         ...(cg.caps ? { capabilities: ["resolved"] } : {}) });
     }
+    if (u.pathname === "/api/reporting/v1/corporate-task-actions" && init.method === "POST") {
+      // The delivery claim (Corporate Gifts' rules: current, open, not changed since the dashboard read it).
+      const b = JSON.parse(init.body);
+      return res(200, { ok: true, results: b.actions.map((a: any) => {
+        const t = cg.tasks.get(a.id);
+        if (!t) return { id: a.id, outcome: "not_found" };
+        if (["delivered", "sending"].includes(t.delivery_status)) return { id: a.id, outcome: "claimed" };
+        if (t.slack_status !== "open" || t.delivery_status === "dismissed") return { id: a.id, outcome: "closed", message: "Closed in Corporate Gifts." };
+        if (t.content_version !== a.content_version) return { id: a.id, outcome: "stale", message: "Changed in Corporate Gifts since the last refresh." };
+        t.delivery_status = "sending";
+        return { id: a.id, outcome: "claimed" };
+      }) });
+    }
     if (u.pathname === "/api/reporting/v1/corporate-task-receipts" && init.method === "POST") {
       if (cg.failReceipts > 0) { cg.failReceipts--; return res(503, { error: { code: "down" } }); }
       const b = JSON.parse(init.body);
@@ -64,6 +77,13 @@ async function fakeFetch(url: string, init: any): Promise<Response> {
     const b = JSON.parse(init.body);
     if (b.expected_version !== t.version) return res(409, { error: { code: "conflict", details: { task: out(t) } } });
     t.due_date = b.due_date; t.version++; t.updated_at = new Date().toISOString(); tracker.patches++;
+    return res(200, { task: out(t) });
+  }
+  const done = /^\/api\/planning\/v1\/tasks\/([^/]+)\/complete$/.exec(u.pathname);
+  if (done && init.method === "POST") {
+    const t = tracker.tasks.get(decodeURIComponent(done[1]));
+    if (!t) return res(404, { error: { code: "not_found" } });
+    if (t.status !== "done") { t.status = "done"; t.version++; t.updated_at = new Date().toISOString(); }
     return res(200, { task: out(t) });
   }
   if (u.pathname === "/api/planning/v1/tasks" && init.method === "POST") {
@@ -338,7 +358,7 @@ describe("Resolved, shared with Corporate Gifts", () => {
     expect((await stateOf(a.id)).status).toBe("resolved");
   });
 
-  it("racing with task creation: a send in progress blocks Resolve; an existing task wins and is linked; an unsettled send is refused", async () => {
+  it("racing with task creation: a send in progress blocks Resolve; an existing task wins, is linked and completed in Task Tracker; an unsettled send is refused", async () => {
     tracker.reset();
     const a = cgTask({ title: "Ship Demo Market November samples" });
     await syncCorporateTasks();
@@ -349,15 +369,16 @@ describe("Resolved, shared with Corporate Gifts", () => {
     await c.query("select pg_advisory_lock(hashtextextended($1, 17))", [a.id]);
     try { expect((await owner("POST", `/review/corporate/${a.id}/resolve`, { version: d.version })).body.error.code).toBe("sending"); }
     finally { await c.query("select pg_advisory_unlock(hashtextextended($1, 17))", [a.id]); c.release(); }
-    // 2. The task was created but the answer was lost: Resolve checks Task Tracker first and links the task instead.
+    // 2. The task was created but the answer was lost: Resolve checks Task Tracker first, links the task and completes it there.
     await owner("POST", "/review/corporate/send", { ids: [a.id] });
     expect(tracker.creates).toBe(1);
     await q(`update corporate_task_drafts set delivery_status = 'unknown', tracker_task_id = null, tracker_status = null where id = $1`, [a.id]);
     d = await stateOf(a.id);
     const r = await owner("POST", `/review/corporate/${a.id}/resolve`, { version: d.version });
-    expect(r.status).toBe(409);
-    expect(r.body.error.code).toBe("task_exists");
-    expect(await stateOf(a.id)).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { status: "open", open_url: expect.stringContaining("/#/tasks/") } });
+    expect(r.status).toBe(200);
+    expect(r.body.outcome).toBe("complete");
+    expect(await stateOf(a.id)).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { status: "done", open_url: expect.stringContaining("/#/tasks/") }, resolution: { state: "resolved" } });
+    expect(tracker.creates).toBe(1);
     // 3. Resolved in Corporate Gifts while the task was being created: the task wins, and Corporate Gifts is told it was delivered.
     a.delivery_status = "resolved";
     await syncCorporateTasks();
