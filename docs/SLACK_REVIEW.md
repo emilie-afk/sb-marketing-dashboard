@@ -32,14 +32,16 @@ history stay in the dashboard tables.
    (review status) and delivery (Task Tracker status) are shown separately. The suggestion stays in Slack Review, with a
    link to the created task.
 5. **Dismiss** keeps the record, so later scans don't bring it back.
-6. **Add to plan** (instead of Create task) copies the reviewed task fields into one of the owner's **draft** plans as
-   an assignment. Draft plans are private to the owner and nothing is sent to Task Tracker while a plan is a draft, so
-   the item stays private and is not a task. It becomes a task only when the owner publishes the plan (publishing
-   sends the plan's assignments). Only draft plans of the suggestion's business are offered; published plans are
-   refused. The fields must be complete (brand, assignee, deadline), as for Create task. The suggestion becomes
-   **In a plan**, links to the plan, and can no longer be edited, created or dismissed here (change it in the plan);
-   later scans never reopen it. If the item is removed from the plan, or the plan is deleted, **Return to review**
-   puts the suggestion back in the review list. Slack text and links are never copied into the plan.
+6. **Add to plan** (instead of Create task) opens a popup where every detail is filled in: title, brief, business, the
+   draft plan (or **New draft plan**: name, prep start and campaign dates, linked to the suggestion's confirmed
+   occasion), assignee and due date (both optional). The item **stays in the Marketing Dashboard**: it is part of the
+   plan, and when the plan is published the team sees it, but it is never sent to Task Tracker. Sending is optional:
+   tick **Send to Task Tracker when the plan is published**, and the item then needs the Task Tracker brand, assignee and
+   due date (checked against Task Tracker's directory) and becomes a task when the plan is published. The tick can also
+   be set later on the plan (Edit plan). Only draft plans are offered; published plans are refused. The suggestion keeps
+   the popup's fields, becomes **In a plan**, links to the plan, and can no longer be edited, created or dismissed here
+   (change it in the plan); later scans never reopen it. If the item is removed from the plan, or the plan is deleted,
+   **Return to review** puts the suggestion back in the review list. Slack text and links are never copied into the plan.
 
 7. **Resolve** (handled, no task) takes the suggestion out of To review without creating anything; like a dismissed one,
    later scans never bring it back.
@@ -50,6 +52,18 @@ On the queue, the **To review** status of each row is a button: **Resolve**, **D
 confirm the title, brief, business, brand, assignee and due date, then send it as one task) and **Add to plan**. The
 queue, its filters and its scroll position stay as they are; the row updates where it is (Sending… / Sent with **Open in
 Task Tracker** / Needs retry with **Retry**) and the tab count changes at once.
+
+A **Resolved** or **Dismissed** status (never a task) is also a button: **Back to review** returns it to To review.
+
+### Bulk actions
+
+Tick rows (or the header box for every row shown) to act on several at once. The bar above the table offers **Resolve**,
+**Dismiss**, **Back to review** and **Add to plan…**, plus **Clear selection**. Each row follows the same rules as its
+own action, one at a time: a row that can't change (for example a task already in Task Tracker, or a row changed in
+another window) is reported and stays selected, and the others are done. Bulk **Add to plan** puts each selected
+suggestion in one draft plan (existing or new) with its own title, brief, and assignee and due date when it is for the
+chosen business; these items stay in the dashboard (tick Send to Task Tracker on the plan for any that should become
+tasks).
 
 ## Occasions
 
@@ -142,6 +156,10 @@ accepted yet; the scanner then starts from its configured start point.
 - Migration `db/migrations/015_occasion_planning.sql` (occasion links, prep date, the `resolved` status, occasion aliases
   and Black Friday / Cyber Monday); rollback `db/rollback/015_occasion_planning.down.sql` (resolved suggestions become
   dismissed, tagged `resolved_before_rollback`; links are dropped).
+- Migration `db/migrations/017_plan_items_optional_send.sql` (plan items kept in the dashboard: `send_to_tracker`, and
+  brand, assignee and due date optional for those items; existing items keep sending); rollback
+  `db/rollback/017_plan_items_optional_send.down.sql` (deploy the previous build first; it removes items kept in the
+  dashboard, whose suggestions then show "Removed from its plan" and can be returned to review).
 - Requires Task Tracker migration `004_task_origin.sql` and the matching deploy (accepts `origin: "review"`) before the
   first task is created.
 - Scanner instructions: [SLACK_REVIEW_SCANNER.md](SLACK_REVIEW_SCANNER.md). The scanner stays unscheduled until the queue

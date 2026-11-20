@@ -138,7 +138,8 @@ function PlanDetail({ id, meta }: { id: string; meta: any }) {
     const p = d.plan, owner = d.owner;
     if (editing) return <PlanEditor meta={meta} plan={p} onDone={(r) => { setEditing(false); if (r?.deadline_impact?.length) setImpact(r.deadline_impact); s.reload(); }} />;
     const created = p.assignments.filter((a: any) => a.task).length;
-    const pending = owner ? p.assignments.filter((a: any) => a.delivery?.status !== "created") : [];
+    const pending = owner ? p.assignments.filter((a: any) => a.send !== false && a.delivery?.status !== "created") : [];
+    const kept = p.assignments.filter((a: any) => a.send === false).length;
     const failed = pending.filter((a: any) => a.delivery?.status === "failed" || a.delivery?.status === "unknown" || a.delivery?.status === "sending").length;
     const openPreview = async () => { setMsg(null); setBusy(true); try { setPreview(await api(`/planning/plans/${p.id}/preview`, { method: "POST" })); } catch (e: any) { setMsg(e.message); } finally { setBusy(false); } };
     const refresh = async () => { setBusy(true); setMsg(null); try { await api(`/planning/plans/${p.id}/refresh`, { method: "POST" }); s.reload(); setMsg("Read the current tasks from Task Tracker."); } catch (e: any) { setMsg(e.message); } finally { setBusy(false); } };
@@ -151,6 +152,7 @@ function PlanDetail({ id, meta }: { id: string; meta: any }) {
           <div className="row">
             <span className={`chip ${p.status === "draft" ? "muted" : ""}`} title="Publication status">{STATUS_LABEL[p.status]}</span>
             {owner && <span className={`chip ${failed ? "bad" : pending.length ? "warn" : ""}`} title="Task delivery status">Tasks: {created} created{pending.length ? `, ${failed ? `${failed} need retry` : `${pending.length} not sent`}` : ""}</span>}
+            {owner && kept > 0 && <span className="chip muted" title="Items kept in the Marketing Dashboard; never sent to Task Tracker">{kept} in the dashboard only</span>}
           </div>
         </div>
         <dl className="kv" style={{ marginTop: 10 }}>
@@ -203,16 +205,16 @@ function AssignmentRow({ a, owner, planId, onChanged }: { a: any; owner: boolean
   };
   return <tr>
     <td><b>{t?.title ?? a.title}</b>{t && t.title !== a.title ? <div className="sub">Planned as: {a.title}</div> : null}</td>
-    <td>{t?.assignee ?? a.assignee.name}<div className="sub">{a.brand.name}</div></td>
-    <td>{fmtDate(t?.due_date ?? a.due_date)}{t && t.due_date !== a.due_date ? <div className="sub">Planned: {fmtDate(a.due_date)}</div> : null}
+    <td>{t?.assignee ?? a.assignee?.name ?? <span className="sub">Not set</span>}{a.brand && <div className="sub">{a.brand.name}</div>}</td>
+    <td>{(t?.due_date ?? a.due_date) ? fmtDate(t?.due_date ?? a.due_date) : <span className="sub">Not set</span>}{t && t.due_date !== a.due_date ? <div className="sub">Planned: {fmtDate(a.due_date)}</div> : null}
       {owner && t && t.status !== "deleted" && (due === null ? <div><a href="#" onClick={(e) => { e.preventDefault(); setRes(null); setDue(t.due_date ?? a.due_date); }}>Update deadline</a></div>
         : <div className="row"><input type="date" aria-label="New deadline" value={due} onChange={(e) => setDue(e.target.value)} /><button className="btn small" onClick={save}>Save in Task Tracker</button><button className="btn small" onClick={() => setDue(null)}>Cancel</button></div>)}
       {res?.outcome === "conflict" && <div className="notice">Changed in Task Tracker since it was last read: now "{res.current?.title}", due {fmtDate(res.current?.due_date)}, {TASK_LABEL[res.current?.status] ?? res.current?.status}. Use Check Task Tracker, then decide again.</div>}
       {res?.outcome === "missing" && <div className="notice">{res.message}</div>}
       {res?.outcome === "error" && <div className="notice">{res.message}</div>}
     </td>
-    {owner && <td><span className={`chip ${a.delivery.status === "failed" || a.delivery.status === "unknown" ? "bad" : a.delivery.status === "created" ? "" : "muted"}`}>{DELIVERY_LABEL[a.delivery.status]}</span>{a.delivery.error && <div className="sub">{a.delivery.error}</div>}</td>}
-    <td>{t ? <><span className={`chip ${t.status === "done" ? "" : "muted"}`}>{TASK_LABEL[t.status] ?? t.status}</span>{t.as_of && <div className="sub">as of {when(t.as_of)}</div>}</> : <span className="sub">Not in Task Tracker</span>}</td>
+    {owner && <td>{a.send === false ? <span className="chip muted">Dashboard only</span> : <><span className={`chip ${a.delivery.status === "failed" || a.delivery.status === "unknown" ? "bad" : a.delivery.status === "created" ? "" : "muted"}`}>{DELIVERY_LABEL[a.delivery.status]}</span>{a.delivery.error && <div className="sub">{a.delivery.error}</div>}</>}</td>}
+    <td>{a.send === false ? <span className="sub">Kept in the dashboard</span> : t ? <><span className={`chip ${t.status === "done" ? "" : "muted"}`}>{TASK_LABEL[t.status] ?? t.status}</span>{t.as_of && <div className="sub">as of {when(t.as_of)}</div>}</> : <span className="sub">Not in Task Tracker</span>}</td>
     <td>{t?.open_url && <a href={t.open_url} target="_blank" rel="noopener noreferrer">Open in Task Tracker</a>}</td>
   </tr>;
 }
@@ -243,6 +245,7 @@ function PreviewDrawer({ preview, onClose, onSend, busy }: { preview: any; onClo
       {preview.items.length ? `These ${preview.items.length} task(s) will be created in Task Tracker exactly as shown. Each is sent once; sending again never creates a duplicate.` : "No tasks to send."}</p>
     {!preview.tracker_connected && <div className="notice">Task Tracker is not connected for planning, so tasks will be marked as needing a retry.</div>}
     {preview.tracker_connected && !preview.directory_checked && <div className="notice">Task Tracker's people list could not be read; it will check each assignment itself.</div>}
+    {preview.kept?.length > 0 && <p className="sub">Kept in the Marketing Dashboard (published with the plan, not sent): {preview.kept.map((k: any) => k.title).join("; ")}.</p>}
     {preview.items.map((i: any) => <div key={i.assignment_id} className="card flat" style={{ marginBottom: 8 }}>
       <dl className="kv"><dt>Title</dt><dd><b>{i.title}</b></dd><dt>Brand</dt><dd>{i.brand}</dd><dt>Assignee</dt><dd>{i.assignee}</dd><dt>Due date</dt><dd>{fmtDate(i.due_date)}</dd>
         <dt>Brief</dt><dd style={{ whiteSpace: "pre-wrap" }}>{i.brief}</dd></dl>
@@ -255,7 +258,7 @@ function PreviewDrawer({ preview, onClose, onSend, busy }: { preview: any; onClo
 }
 
 // ====================================================================== create and edit (owner)
-type Asg = { id?: string; title: string; brief: string; tracker_brand_id: string; tracker_assignee_id: string; due_date: string; locked?: boolean; lockNote?: string; label?: string };
+type Asg = { id?: string; title: string; brief: string; send: boolean; tracker_brand_id: string; tracker_assignee_id: string; due_date: string; locked?: boolean; lockNote?: string; label?: string };
 
 export function PlanEditor({ meta, plan, onDone }: { meta: any; plan?: any; onDone?: (r?: any) => void }) {
   const [q] = useHashQuery();
@@ -270,8 +273,8 @@ export function PlanEditor({ meta, plan, onDone }: { meta: any; plan?: any; onDo
     sheet_occasion_id: plan.occasion?.kind === "sheet" ? plan.occasion.id : null, promotion_id: plan.promotion?.id ?? null,
   } : { business_id: q.get("business") || "sb", name: "", prep_start: "", campaign_start: "", campaign_end: "", objective: "", channels: [], categories: q.get("category") ? [q.get("category")] : [], target_audience: "", message_angle: "", deliverables: "", notes: "",
     gift_occasion_id: gift, occurrence_year: gyear, sheet_occasion_id: sheet, promotion_id: null });
-  const [asg, setAsg] = useState<Asg[]>(() => (plan?.assignments ?? []).map((a: any) => ({ id: a.id, title: a.title, brief: a.brief ?? "", tracker_brand_id: a.brand.id, tracker_assignee_id: a.assignee.id, due_date: a.due_date,
-    locked: ["created", "sending", "unknown"].includes(a.delivery.status), lockNote: a.delivery.status === "created" ? "In Task Tracker" : "Send not settled", label: `${a.brand.name} · ${a.assignee.name}` })));
+  const [asg, setAsg] = useState<Asg[]>(() => (plan?.assignments ?? []).map((a: any) => ({ id: a.id, title: a.title, brief: a.brief ?? "", send: a.send !== false, tracker_brand_id: a.brand?.id ?? "", tracker_assignee_id: a.assignee?.id ?? "", due_date: a.due_date ?? "",
+    locked: ["created", "sending", "unknown"].includes(a.delivery.status), lockNote: a.delivery.status === "created" ? "In Task Tracker" : "Send not settled", label: [a.brand?.name, a.assignee?.name].filter(Boolean).join(" · ") })));
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // Defaults from the occasion: name, and campaign dates leading into it.
@@ -283,7 +286,8 @@ export function PlanEditor({ meta, plan, onDone }: { meta: any; plan?: any; onDo
       campaign_end: o.dates?.end ?? "", campaign_start: o.dates ? addDaysStr(o.dates.start, -14) : "", prep_start: o.dates ? addDaysStr(o.dates.start, -49) : "" }));
   }, [occ.data]);
   const brands = useMemo(() => (dir.data?.brands ?? []).filter((b: any) => b.business_id === v.business_id), [dir.data, v.business_id]);
-  const peopleFor = (brandId: string) => (dir.data?.people ?? []).filter((p: any) => p.brand_ids.includes(brandId));
+  // To send, the person must work in the chosen brand; for an item kept in the dashboard, anyone on the business.
+  const peopleFor = (brandId: string) => (dir.data?.people ?? []).filter((p: any) => brandId ? p.brand_ids.includes(brandId) : p.brand_ids.some((id: string) => brands.some((b: any) => b.id === id)));
   const set = (k: string) => (e: any) => setV({ ...v, [k]: e.target.value });
   const toggle = (c: string) => setV({ ...v, channels: v.channels.includes(c) ? v.channels.filter((x: string) => x !== c) : [...v.channels, c] });
   const cats = useApi<any>(meta.owner ? "/planning/categories" : null);
@@ -291,7 +295,8 @@ export function PlanEditor({ meta, plan, onDone }: { meta: any; plan?: any; onDo
   const toggleCat = (c: string) => setV({ ...v, categories: v.categories.includes(c) ? v.categories.filter((x: string) => x !== c) : [...v.categories, c].slice(0, 10) });
   const submit = async (e: any) => {
     e.preventDefault(); setErr(null); setSaving(true);
-    const body = { ...v, occurrence_year: v.gift_occasion_id ? v.occurrence_year : null, assignments: asg.map(({ locked, lockNote, label, ...a }) => ({ ...a, brief: a.brief || null })) };
+    const body = { ...v, occurrence_year: v.gift_occasion_id ? v.occurrence_year : null, assignments: asg.map(({ locked, lockNote, label, send, ...a }) => ({ ...a, send_to_tracker: send, brief: a.brief || null,
+      tracker_brand_id: a.tracker_brand_id || null, tracker_assignee_id: a.tracker_assignee_id || null, due_date: a.due_date || null })) };
     try {
       if (editing) { const r = await api<any>(`/planning/plans/${plan.id}`, { method: "PATCH", json: { ...body, version: plan.version } }); onDone?.(r); }
       else { const r = await api<any>("/planning/plans", { method: "POST", json: body }); location.hash = `#/planning/${r.plan.id}`; }
@@ -322,20 +327,23 @@ export function PlanEditor({ meta, plan, onDone }: { meta: any; plan?: any; onDo
       {label("Notes (not sent with tasks)", <textarea aria-label="Notes" rows={2} maxLength={4000} value={v.notes} onChange={set("notes")} />, true)}
     </div>
     <h3>Assignments</h3>
-    <p className="sub">Saving keeps these in the plan only; tasks are created in Task Tracker when you publish. The brief, campaign dates, channels, audience and message angle go with each task.</p>
+    <p className="sub">Saving keeps these in the plan only. Items marked “Send to Task Tracker” become tasks when you publish (the brief, campaign dates, channels, audience and message angle go with each); the others stay in the Marketing Dashboard.</p>
     {dir.error && <div className="notice">Task Tracker's people list could not be read: {dir.error.message}</div>}
     {asg.map((a, i) => <div key={a.id ?? `n${i}`} className="card flat" style={{ marginBottom: 8, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
       {a.locked ? <><div style={{ gridColumn: "1 / -1" }}><b>{a.title}</b> <span className="chip">{a.lockNote}</span><div className="sub">{a.label} · due {fmtDate(a.due_date)} · {a.lockNote === "In Task Tracker" ? "change it in Task Tracker, or with Update deadline on the plan." : "use Retry or Check Task Tracker on the plan before changing it."}</div></div></> : <>
         {label("Task title", <input aria-label="Task title" required maxLength={300} value={a.title} onChange={(e) => setAsg(asg.map((x, j) => j === i ? { ...x, title: e.target.value } : x))} />, true)}
-        {label("Task Tracker brand", <select aria-label="Task Tracker brand" required value={a.tracker_brand_id} onChange={(e) => setAsg(asg.map((x, j) => j === i ? { ...x, tracker_brand_id: e.target.value, tracker_assignee_id: "" } : x))}>
+        <label className="check" style={{ gridColumn: "1 / -1", display: "flex" }}><input type="checkbox" aria-label="Send to Task Tracker" checked={a.send}
+          onChange={(e) => setAsg(asg.map((x, j) => j === i ? { ...x, send: e.target.checked, tracker_brand_id: e.target.checked && !x.tracker_brand_id && brands.length === 1 ? brands[0].id : x.tracker_brand_id } : x))} />
+          Send to Task Tracker when published <span className="sub">{a.send ? "" : "(kept in the Marketing Dashboard)"}</span></label>
+        {a.send && label("Task Tracker brand", <select aria-label="Task Tracker brand" required value={a.tracker_brand_id} onChange={(e) => setAsg(asg.map((x, j) => j === i ? { ...x, tracker_brand_id: e.target.value, tracker_assignee_id: "" } : x))}>
           <option value="">Choose</option>{brands.map((b: any) => <option key={b.id} value={b.id}>{b.name}</option>)}</select>)}
-        {label("Assignee", <select aria-label="Assignee" required value={a.tracker_assignee_id} onChange={(e) => setAsg(asg.map((x, j) => j === i ? { ...x, tracker_assignee_id: e.target.value } : x))}>
-          <option value="">Choose</option>{peopleFor(a.tracker_brand_id).map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>)}
-        {label("Due date", <input aria-label="Due date" type="date" required value={a.due_date} onChange={(e) => setAsg(asg.map((x, j) => j === i ? { ...x, due_date: e.target.value } : x))} />)}
+        {label(a.send ? "Assignee" : "Assignee (optional)", <select aria-label="Assignee" required={a.send} value={a.tracker_assignee_id} onChange={(e) => setAsg(asg.map((x, j) => j === i ? { ...x, tracker_assignee_id: e.target.value } : x))}>
+          <option value="">{a.send ? "Choose" : "Not set"}</option>{peopleFor(a.send ? a.tracker_brand_id : "").map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>)}
+        {label(a.send ? "Due date" : "Due date (optional)", <input aria-label="Due date" type="date" required={a.send} value={a.due_date} onChange={(e) => setAsg(asg.map((x, j) => j === i ? { ...x, due_date: e.target.value } : x))} />)}
         {label("Brief for the assignee", <textarea aria-label="Brief" rows={2} maxLength={1500} value={a.brief} onChange={(e) => setAsg(asg.map((x, j) => j === i ? { ...x, brief: e.target.value } : x))} />, true)}
         <div><button type="button" className="btn small" onClick={() => setAsg(asg.filter((_, j) => j !== i))}>Remove</button></div></>}
     </div>)}
-    <button type="button" className="btn small" onClick={() => setAsg([...asg, { title: "", brief: "", tracker_brand_id: brands.length === 1 ? brands[0].id : "", tracker_assignee_id: "", due_date: v.prep_start || "" }])}>Add assignment</button>
+    <button type="button" className="btn small" onClick={() => setAsg([...asg, { title: "", brief: "", send: true, tracker_brand_id: brands.length === 1 ? brands[0].id : "", tracker_assignee_id: "", due_date: v.prep_start || "" }])}>Add assignment</button>
     {err && <div className="notice">{err}</div>}
     <div className="row" style={{ marginTop: 12 }}>
       <button className="btn primary" disabled={saving}>{editing ? "Save" : "Save draft"}</button>

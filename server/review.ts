@@ -8,7 +8,8 @@
 // - The scanner submits suggestions with its own revocable secret (SLACK_REVIEW_INGEST_SECRET, header
 //   x-review-ingest-key) and may read only its own checkpoint. It cannot list or read the queue, review, or create
 //   tasks, and it never sees the Task Tracker planning credential. Sessions are not accepted on the scanner path.
-// - Only the fields Emilie approves (title, brief, brand, assignee, due date) go to Task Tracker. Slack excerpts, links,
+// - Only the fields Emilie approves (title, brief, brand, assignee, due date) go to Task Tracker, and only through Add to
+//   task or a plan item she marks "Send to Task Tracker"; Add to plan otherwise keeps the item in the dashboard. Slack excerpts, links,
 //   scanner notes and review history stay in these tables and are not used by any shared view, export or report.
 import { createHash, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
@@ -16,7 +17,7 @@ import type pg from "pg";
 import { query, one, tx, getPool } from "./db";
 import { HttpError, badRequest, notFound, readJson, json } from "./http";
 import type { Session } from "./auth";
-import { isPlanningOwner, PLAN_BUSINESSES, BUSINESS_LABEL } from "./planning";
+import { isPlanningOwner, PLAN_BUSINESSES, BUSINESS_LABEL, nameItem, type AsgInput } from "./planning";
 import { trackerDirectory, planningTrackerConfigured, type Directory } from "./adapters/planningClient";
 import { trackerOrigin } from "./adapters/taskTracker";
 import { deliverClaimed, checkAgainstDirectory, claimedTimes, reconcile, setDelivery } from "./trackerDelivery";
@@ -153,7 +154,7 @@ const COLS = `s.id, s.source_key, s.channel_id, s.message_ts, s.thread_ts, s.pos
   s.status, s.reviewed_at, s.edited, s.version, s.delivery_status, s.delivery_error, s.last_attempt_at, s.highest_sent_at, s.fenced_through,
   s.tracker_task_id, s.tracker_version, s.tracker_title, to_char(s.tracker_due_date,'YYYY-MM-DD') tracker_due_date, s.tracker_status, s.tracker_assignee_name_now,
   s.tracker_updated_at, s.created_at, s.updated_at,
-  s.plan_id, s.plan_assignment_id, s.planned_at, mp.name plan_name, mp.status plan_status, pa.delivery_status plan_assignment_delivery,
+  s.plan_id, s.plan_assignment_id, s.planned_at, mp.name plan_name, mp.status plan_status, pa.delivery_status plan_assignment_delivery, pa.send_to_tracker plan_assignment_send,
   s.occasion_status, s.occasion_id, s.occasion_year, s.occasion_candidates, s.occasion_matched_at, s.occasion_confirmed_at, to_char(s.prep_date,'YYYY-MM-DD') prep_date, go.name occasion_name,
   r.status sync_status, to_char(r.due_date,'YYYY-MM-DD') sync_due_date, r.title sync_title, r.assignee_name sync_assignee_name, r.source_updated_at sync_updated_at, r.removed_at sync_removed_at`;
 const FROM = `review_suggestions s left join tracker_task_records r on r.record_id = 'task:' || s.tracker_task_id::text and r.kind = 'task'
@@ -204,7 +205,7 @@ function dto(s: any, followups: any[] = [], idx: OccasionIndex | null = null) {
     task: taskOf(s),
     plan: s.status === "planned" ? { id: s.plan_id, name: s.plan_name ?? null, status: s.plan_status ?? null, planned_at: s.planned_at,
       // The plan's own item: removed if it was deleted from the plan (or the plan was deleted); otherwise its send state.
-      item: s.plan_assignment_id ? { delivery: s.plan_assignment_delivery } : null } : null,
+      item: s.plan_assignment_id ? { delivery: s.plan_assignment_delivery, send: s.plan_assignment_send !== false } : null } : null,
     locked: ["sending", "created", "unknown"].includes(s.delivery_status) || s.status === "planned",
     occasion: occasionOf(s, idx),
   };
@@ -436,63 +437,171 @@ export async function classifySuggestion(s: Session, id: string, v: z.infer<type
 
 const PLANNED_MSG = "This suggestion is in a marketing plan. Change or remove it in the plan.";
 
-export const addToPlanSchema = z.object({ version: z.number().int().min(1), plan_id: z.string().uuid() }).strict();
+const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const isoDate = z.string().refine(isIsoDate, "must be a date");
+/** A new draft plan made from the Add to plan popup (the rest of the plan is filled in later on the plan itself). */
+const newPlanSchema = z.object({
+  name: z.string().trim().min(1).max(200).refine((v) => !/[\u0000-\u001f\u007f]/.test(v), "control characters"),
+  prep_start: isoDate, campaign_start: isoDate, campaign_end: isoDate,
+  occasion: z.object({ id: z.string().regex(/^[a-z0-9-]{2,60}$/), year: z.number().int().min(2000).max(2100) }).strict().nullable().optional(),
+}).strict().superRefine((v, ctx) => {
+  if (v.prep_start > v.campaign_start) ctx.addIssue({ code: "custom", path: ["prep_start"], message: "Prep must start on or before the campaign starts." });
+  if (v.campaign_start > v.campaign_end) ctx.addIssue({ code: "custom", path: ["campaign_end"], message: "The campaign must end on or after it starts." });
+});
+const target = { plan_id: z.string().regex(uuidRe).optional(), new_plan: newPlanSchema.optional(), business_id: z.enum(PLAN_BUSINESSES) };
+const oneTarget = (v: { plan_id?: string; new_plan?: unknown }) => !!v.plan_id !== !!v.new_plan;
 
-/** Draft plans a suggestion can go into: the owner's draft plans for the suggestion's business. */
-export async function planChoices(s: Session, id: string) {
+/** Add to plan from the popup: the item's details are filled in there. Sending to Task Tracker is optional (off by default). */
+export const addToPlanSchema = z.object({
+  version: z.number().int().min(1), ...target,
+  title: txt(300).refine((v) => v.trim().length > 0, "required"), brief: txt(1500).nullable().optional(),
+  send_to_tracker: z.boolean().default(false),
+  tracker_brand_id: z.string().regex(uuidRe).nullable().optional(), tracker_assignee_id: z.string().regex(uuidRe).nullable().optional(),
+  due_date: isoDate.nullable().optional(),
+}).strict().refine(oneTarget, "Choose a draft plan or create one.");
+
+/** Several suggestions into one plan, each with its own fields, kept in the dashboard (not sent to Task Tracker). */
+export const bulkAddSchema = z.object({
+  items: z.array(z.object({ id: z.string().regex(uuidRe), version: z.number().int().min(1) }).strict()).min(1).max(100), ...target,
+}).strict().refine(oneTarget, "Choose a draft plan or create one.");
+
+/** Draft plans a suggestion can go into: all of the owner's draft plans (grouped by business on the page). */
+export async function planChoices(s: Session, id?: string) {
   assertReviewer(s);
-  const r = await row(id);
-  if (!r) throw notFound("Suggestion");
-  if (!r.business_id) return { business: null, plans: [] };
-  const linked = r.occasion_status === "confirmed" ? { id: r.occasion_id, year: r.occasion_year } : null;
-  const rows = await query<any>(`select p.id, p.name, to_char(p.prep_start,'YYYY-MM-DD') prep_start, to_char(p.campaign_start,'YYYY-MM-DD') campaign_start, to_char(p.campaign_end,'YYYY-MM-DD') campaign_end,
+  const r = id ? await row(id) : null;
+  if (id && !r) throw notFound("Suggestion");
+  const linked = r && r.occasion_status === "confirmed" ? { id: r.occasion_id, year: r.occasion_year } : null;
+  const rows = await query<any>(`select p.id, p.name, p.business_id, to_char(p.prep_start,'YYYY-MM-DD') prep_start, to_char(p.campaign_start,'YYYY-MM-DD') campaign_start, to_char(p.campaign_end,'YYYY-MM-DD') campaign_end,
                                         p.gift_occasion_id, p.occurrence_year, g.name occasion_name, p.categories
                                    from marketing_plans p left join gift_occasions g on g.id = p.gift_occasion_id
-                                  where p.status = 'draft' and p.business_id = $1 order by p.campaign_start, p.name limit 200`, [r.business_id]);
+                                  where p.status = 'draft' order by p.campaign_start, p.name limit 500`);
   // Plans for the suggestion's confirmed occasion first; a plan linked to another occasion carries a warning.
-  const plans = rows.map((p) => ({ id: p.id, name: p.name, prep_start: p.prep_start, campaign_start: p.campaign_start, campaign_end: p.campaign_end, categories: p.categories ?? [],
+  const plans = rows.map((p) => ({ id: p.id, name: p.name, business_id: p.business_id, prep_start: p.prep_start, campaign_start: p.campaign_start, campaign_end: p.campaign_end, categories: p.categories ?? [],
     occasion: p.gift_occasion_id ? { id: p.gift_occasion_id, name: p.occasion_name, year: p.occurrence_year } : null,
     match: !linked ? "none" : p.gift_occasion_id === linked.id && p.occurrence_year === linked.year ? "same" : p.gift_occasion_id ? "different" : "none" }));
   const rank = (m: string) => (m === "same" ? 0 : m === "none" ? 1 : 2);
   plans.sort((a, b) => rank(a.match) - rank(b.match));
-  return { business: r.business_id, occasion: linked ? { ...linked, name: r.occasion_name } : null, plans };
+  return { business: r?.business_id ?? r?.suggested_business ?? null, occasion: linked ? { ...linked, name: r.occasion_name } : null, plans };
 }
 
+/** The draft plan the items go into: an existing draft of the business, or a new one made here (private, like any draft). */
+async function planTarget(c: pg.PoolClient, s: Session, v: { plan_id?: string; new_plan?: z.infer<typeof newPlanSchema>; business_id: string }) {
+  if (v.plan_id) {
+    const plan = (await c.query("select id, business_id, status from marketing_plans where id = $1 for update", [v.plan_id])).rows[0];
+    if (!plan) throw notFound("Plan");
+    if (plan.status !== "draft") throw new HttpError(409, "plan_published", "Choose a draft plan. A published plan is visible to the team.");
+    if (plan.business_id !== v.business_id) throw badRequest("That plan belongs to another business.");
+    return plan.id as string;
+  }
+  const np = v.new_plan!;
+  if (np.occasion) {
+    const o = (await c.query("select kind, (select array_agg(business_id) from gift_occasion_brands b where b.occasion_id = o.id) brands from gift_occasions o where id = $1 and active", [np.occasion.id])).rows[0];
+    if (!o || o.kind !== "dated") throw badRequest("Choose a dated occasion.");
+    if (!(o.brands ?? []).includes(v.business_id)) throw badRequest("That occasion does not apply to this business.");
+  }
+  const r = await c.query(`insert into marketing_plans (business_id, name, gift_occasion_id, occurrence_year, prep_start, campaign_start, campaign_end, created_by)
+                           values ($1,$2,$3,$4,$5,$6,$7,$8) returning id`,
+    [v.business_id, np.name, np.occasion?.id ?? null, np.occasion?.year ?? null, np.prep_start, np.campaign_start, np.campaign_end, s.email]);
+  return r.rows[0].id as string;
+}
+
+/** Puts one locked, still-to-review suggestion into a plan as an item with the given fields; the suggestion keeps the same fields. */
+async function addOne(c: pg.PoolClient, cur: any, planId: string, business: string, item: AsgInput, dir: Directory | null) {
+  if (cur.status !== "pending" || cur.delivery_status !== "not_sent") throw new HttpError(409, "not_pending", "Only a suggestion still to review can be added to a plan.");
+  const n = nameItem(dir, business, item, cur);
+  const a = await c.query(`insert into plan_assignments (plan_id, sort_order, title, brief, send_to_tracker, tracker_brand_id, tracker_brand_name, tracker_assignee_id, tracker_assignee_name, due_date)
+                           values ($1, (select coalesce(max(sort_order), -1) + 1 from plan_assignments where plan_id = $1), $2, $3, $4, $5, $6, $7, $8, $9) returning id`,
+    [planId, item.title.trim(), item.brief || null, n.send, n.brandId, n.brandName, n.personId, n.personName, n.due]);
+  const edited = item.title.trim() !== cur.title || (item.brief || null) !== (cur.brief || null) || business !== cur.business_id || n.brandId !== cur.tracker_brand_id
+    || n.personId !== cur.tracker_assignee_id || n.due !== cur.due_date_s;
+  await c.query(`update review_suggestions set title = $4, brief = $5, business_id = $6, tracker_brand_id = $7, tracker_brand_name = $8, tracker_assignee_id = $9, tracker_assignee_name = $10,
+                   due_date = $11, edited = edited or $12, status = 'planned', plan_id = $2, plan_assignment_id = $3, planned_at = now(), reviewed_at = coalesce(reviewed_at, now()),
+                   updated_at = now(), version = version + 1 where id = $1`,
+    [cur.id, planId, a.rows[0].id, item.title.trim(), item.brief || null, business, n.brandId, n.brandName, n.personId, n.personName, n.due, edited]);
+}
+const touchPlan = (c: pg.PoolClient, planId: string) =>
+  // The plan changed: an editor still open on the old version must reload instead of overwriting the new item.
+  c.query("update marketing_plans set updated_at = now(), version = version + 1 where id = $1", [planId]);
+
 /**
- * Add to plan: the approved fields become an assignment in one of the owner's DRAFT plans. Nothing is sent to Task
- * Tracker (the plan sends it only when it is published), and the item stays private while the plan is a draft. The
- * Slack excerpt, links and notes are not copied. Later scans never reopen it.
+ * Add to plan: the details filled in the popup become an item in one of the owner's DRAFT plans (or a new draft plan).
+ * The item stays in the Marketing Dashboard unless "Send to Task Tracker" is ticked; then it is sent when the plan is
+ * published (and needs brand, assignee and due date). Nothing is sent now. The Slack excerpt, links and notes are not
+ * copied. Later scans never reopen it.
  */
 export async function addToPlan(s: Session, id: string, v: z.infer<typeof addToPlanSchema>) {
   assertReviewer(s);
-  const dir = await dirOrNull();
+  const dir = v.send_to_tracker || v.tracker_brand_id || v.tracker_assignee_id ? await dirOrNull() : null;
+  let planId = "";
   await tx(async (c) => {
     const cur = await row(id, c, true);
     if (!cur) throw notFound("Suggestion");
     if (cur.version !== v.version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload first.");
-    if (cur.status !== "pending" || cur.delivery_status !== "not_sent") throw new HttpError(409, "not_pending", "Only a suggestion still to review can be added to a plan.");
-    const missing = needs(cur);
-    if (missing.length) throw new HttpError(422, "incomplete", `Before adding it to a plan: ${missing.join("; ")}.`);
-    const plan = (await c.query("select id, business_id, status from marketing_plans where id = $1 for update", [v.plan_id])).rows[0];
-    if (!plan) throw notFound("Plan");
-    if (plan.status !== "draft") throw new HttpError(409, "plan_published", "Choose a draft plan. A published plan is visible to the team and sends its tasks.");
-    if (plan.business_id !== cur.business_id) throw badRequest("That plan belongs to another business.");
-    let brandName = cur.tracker_brand_name, personName = cur.tracker_assignee_name;
-    if (dir) {
-      const chk = checkAgainstDirectory(dir, cur.business_id, { brand_id: cur.tracker_brand_id, assignee_id: cur.tracker_assignee_id });
-      if (!chk.ok) throw new HttpError(422, chk.code, chk.message);
-      brandName = chk.brand.name; personName = chk.person.name;
-    }
-    if (!brandName || !personName) throw new HttpError(503, "tracker_unavailable", "Task Tracker could not be reached to check the brand and assignee. Try again.");
-    const a = await c.query(`insert into plan_assignments (plan_id, sort_order, title, brief, tracker_brand_id, tracker_brand_name, tracker_assignee_id, tracker_assignee_name, due_date)
-                             values ($1, (select coalesce(max(sort_order), -1) + 1 from plan_assignments where plan_id = $1), $2, $3, $4, $5, $6, $7, $8) returning id`,
-      [plan.id, cur.title, cur.brief, cur.tracker_brand_id, brandName, cur.tracker_assignee_id, personName, cur.due_date_s]);
-    // The plan changed: an editor still open on the old version must reload instead of overwriting the new item.
-    await c.query("update marketing_plans set updated_at = now(), version = version + 1 where id = $1", [plan.id]);
-    await c.query(`update review_suggestions set status = 'planned', plan_id = $2, plan_assignment_id = $3, planned_at = now(), reviewed_at = coalesce(reviewed_at, now()),
-                     updated_at = now(), version = version + 1 where id = $1`, [id, plan.id, a.rows[0].id]);
+    planId = await planTarget(c, s, v);
+    await addOne(c, cur, planId, v.business_id, { title: v.title, brief: v.brief ?? null, send_to_tracker: v.send_to_tracker, tracker_brand_id: v.tracker_brand_id ?? null,
+      tracker_assignee_id: v.tracker_assignee_id ?? null, due_date: v.due_date ?? null }, dir);
+    await touchPlan(c, planId);
+  });
+  return { suggestion: await getSuggestion(s, id), plan_id: planId };
+}
+
+/**
+ * Bulk Add to plan: each selected suggestion becomes an item in one draft plan with its own title, brief and (when it
+ * is for the same business) assignee and due date. Items are kept in the dashboard; tick "Send to Task Tracker" on the
+ * plan for any that should become tasks. Each suggestion is handled on its own: one refused leaves the others added.
+ */
+export async function bulkAddToPlan(s: Session, v: z.infer<typeof bulkAddSchema>) {
+  assertReviewer(s);
+  const planId = await tx((c) => planTarget(c, s, v));
+  const dir = await dirOrNull();
+  const results: { id: string; ok: boolean; message?: string }[] = [];
+  for (const it of v.items) {
+    try {
+      await tx(async (c) => {
+        const cur = await row(it.id, c, true);
+        if (!cur) throw notFound("Suggestion");
+        if (cur.version !== it.version) throw new HttpError(409, "conflict", "Changed in another window. Reload first.");
+        await c.query("select 1 from marketing_plans where id = $1 for update", [planId]);
+        const same = cur.business_id === v.business_id;
+        await addOne(c, cur, planId, v.business_id, { title: cur.title, brief: cur.brief, send_to_tracker: false,
+          tracker_brand_id: same ? cur.tracker_brand_id : null, tracker_assignee_id: same ? cur.tracker_assignee_id : null, due_date: cur.due_date_s ?? null }, dir);
+        await touchPlan(c, planId);
+      });
+      results.push({ id: it.id, ok: true });
+    } catch (e: any) { results.push({ id: it.id, ok: false, message: e?.message ?? "Failed." }); }
+  }
+  return { plan_id: planId, results, items: await Promise.all(v.items.map((it) => getSuggestion(s, it.id).catch(() => null))) };
+}
+
+/** Back to review: a dismissed or resolved suggestion (never a task) returns to "To review". */
+export async function reopenSuggestion(s: Session, id: string, version: number) {
+  assertReviewer(s);
+  await tx(async (c) => {
+    const cur = await row(id, c, true);
+    if (!cur) throw notFound("Suggestion");
+    if (cur.version !== version) throw new HttpError(409, "conflict", "This suggestion changed in another window. Reload first.");
+    if (!["dismissed", "resolved"].includes(cur.status)) throw new HttpError(409, "not_closed", "Only a dismissed or resolved suggestion can go back to review.");
+    if (!["not_sent", "failed"].includes(cur.delivery_status)) throw new HttpError(409, "delivery_locked", "A Task Tracker task exists or may exist for this suggestion.");
+    await c.query("update review_suggestions set status = 'pending', reviewed_at = null, updated_at = now(), version = version + 1 where id = $1", [id]);
   });
   return getSuggestion(s, id);
+}
+
+export const bulkStatusSchema = z.object({
+  action: z.enum(["resolve", "dismiss", "reopen"]),
+  items: z.array(z.object({ id: z.string().regex(uuidRe), version: z.number().int().min(1) }).strict()).min(1).max(100),
+}).strict();
+
+/** Sets the status of several suggestions, one at a time with the same rules as the row actions. Refusals are reported per item. */
+export async function bulkStatus(s: Session, v: z.infer<typeof bulkStatusSchema>) {
+  assertReviewer(s);
+  const fn = v.action === "resolve" ? resolveSuggestion : v.action === "dismiss" ? dismissSuggestion : reopenSuggestion;
+  const results: { id: string; ok: boolean; message?: string; suggestion?: any }[] = [];
+  for (const it of v.items) {
+    try { results.push({ id: it.id, ok: true, suggestion: await fn(s, it.id, it.version) }); }
+    catch (e: any) { results.push({ id: it.id, ok: false, message: e?.message ?? "Failed.", suggestion: await getSuggestion(s, it.id).catch(() => undefined) }); }
+  }
+  return { results };
 }
 
 /** A planned suggestion whose plan item was removed (or whose plan was deleted) can come back to the review list. */

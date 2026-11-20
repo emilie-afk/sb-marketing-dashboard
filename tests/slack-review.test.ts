@@ -295,41 +295,44 @@ describe("Add to plan", () => {
   };
   const cur = async (id: string) => (await owner("GET", `/review/suggestions/${id}`)).body.suggestion;
 
-  it("puts the approved fields in a draft plan: private to Emilie, not a task until the plan is published", async () => {
+  // The popup's body: the details are filled in there; sending to Task Tracker is off unless asked for.
+  const toPlan = (id: string, version: number, title: string, over: Record<string, unknown> = {}) => owner("POST", `/review/suggestions/${id}/add-to-plan`, { version, business_id: "sb", title, ...over });
+
+  it("keeps the item in the Marketing Dashboard by default: details from the popup, nothing sent, even when the plan is published", async () => {
     const draft = (await owner("POST", "/planning/plans", planBody("Synthetic gift-guide push"))).body.plan;
     const pub = (await owner("POST", "/planning/plans", planBody("Synthetic published plan"))).body.plan;
     expect((await owner("POST", `/planning/plans/${pub.id}/publish`, { version: pub.version })).status).toBe(200);
     const s = await fresh("Refresh the gift guide hero");
-    await fill(s.id);
     const before = (await owner("GET", "/review/summary")).body.pending;
 
-    // Only draft plans of the suggestion's business are offered; a published plan is refused.
+    // All draft plans are offered (the page filters by business); a published plan is refused.
     const choices = (await owner("GET", `/review/suggestions/${s.id}/plans`)).body;
     expect(choices.plans.map((p: any) => p.id)).toContain(draft.id);
     expect(choices.plans.map((p: any) => p.id)).not.toContain(pub.id);
+    expect(choices.plans.find((p: any) => p.id === draft.id).business_id).toBe("sb");
     let v = (await cur(s.id)).version;
-    const refused = await owner("POST", `/review/suggestions/${s.id}/add-to-plan`, { version: v, plan_id: pub.id });
+    const refused = await toPlan(s.id, v, "Refresh the gift guide hero", { plan_id: pub.id });
     expect(refused.status).toBe(409);
     expect(refused.body.error.code).toBe("plan_published");
+    expect((await toPlan(s.id, v, "Refresh the gift guide hero")).status).toBe(400);   // no plan chosen
 
-    // An incomplete suggestion can't go into a plan.
-    const inc = await fresh("Draft the florist outreach list");
-    expect((await owner("POST", `/review/suggestions/${inc.id}/add-to-plan`, { version: inc.version, plan_id: draft.id })).body.error.code).toBe("incomplete");
-
-    const added = await owner("POST", `/review/suggestions/${s.id}/add-to-plan`, { version: v, plan_id: draft.id });
+    // No brand, assignee or due date needed when it stays in the dashboard; the popup's title and brief are used.
+    const added = await toPlan(s.id, v, "Refresh the gift guide hero image", { plan_id: draft.id, brief: "Synthetic brief from the popup", due_date: "2026-12-04" });
     expect(added.status).toBe(200);
-    expect(added.body.suggestion).toMatchObject({ status: "planned", locked: true, plan: { id: draft.id, name: "Synthetic gift-guide push", status: "draft", item: { delivery: "not_sent" } } });
+    expect(added.body.suggestion).toMatchObject({ status: "planned", locked: true, fields: { title: "Refresh the gift guide hero image", business_id: "sb", due_date: "2026-12-04", assignee: null },
+      plan: { id: draft.id, name: "Synthetic gift-guide push", status: "draft", item: { delivery: "not_sent", send: false } } });
     expect(tracker.creates).toBe(0);
-    expect((await owner("GET", "/review/summary")).body.pending).toBe(before - 1 + 1);   // one left the queue, the incomplete one joined it
+    expect((await owner("GET", "/review/summary")).body.pending).toBe(before - 1);
     expect((await owner("GET", "/review/suggestions?status=planned")).body.items.map((i: any) => i.id)).toContain(s.id);
 
-    // The plan has the item with the approved fields only, and an editor open on the old plan version must reload.
-    const plan = (await owner("GET", `/planning/plans/${draft.id}`)).body.plan;
-    expect(plan.assignments.map((a: any) => a.title)).toContain("Refresh the gift guide hero");
+    // The plan has the item (kept in the dashboard), and an editor open on the old plan version must reload.
+    let plan = (await owner("GET", `/planning/plans/${draft.id}`)).body.plan;
+    expect(plan.assignments.find((a: any) => a.title === "Refresh the gift guide hero image")).toMatchObject({ send: false, brief: "Synthetic brief from the popup", brand: null, assignee: null, due_date: "2026-12-04" });
+    expect(plan).toMatchObject({ pending_count: 0, local_count: 1 });
     expect(JSON.stringify(plan)).not.toMatch(/Synthetic: please|slack\.com/);
     expect((await owner("PATCH", `/planning/plans/${draft.id}`, { version: draft.version, ...planBody("Stale edit") })).status).toBe(409);
 
-    // Nobody else sees it: not the draft plan, not a task, not the queue.
+    // Nobody else sees it while the plan is a draft.
     expect((await req("manager@example.test", "GET", `/planning/plans/${draft.id}`)).status).toBe(404);
     expect(JSON.stringify((await req("manager@example.test", "GET", "/planning/plans")).body)).not.toContain("Refresh the gift guide hero");
     expect((await req("manager@example.test", "GET", `/review/suggestions/${s.id}`)).status).toBe(404);
@@ -339,26 +342,63 @@ describe("Add to plan", () => {
     expect((await owner("POST", `/review/suggestions/${s.id}/create`, { version: v })).body.error.code).toBe("planned");
     expect((await owner("POST", `/review/suggestions/${s.id}/dismiss`, { version: v })).body.error.code).toBe("planned");
     expect((await fill(s.id)).body.error.code).toBe("planned");
-    expect((await owner("POST", `/review/suggestions/${s.id}/add-to-plan`, { version: v, plan_id: draft.id })).body.error.code).toBe("not_pending");
-    const again = await scan("POST", "/review-intake/batches", batch([{ ...msg(), message_ts: s.source_key?.split(":")[2] ?? (await q("select message_ts from review_suggestions where id = $1", [s.id]))[0].message_ts, title: "Overwritten?" }]));
+    expect((await toPlan(s.id, v, "Again", { plan_id: draft.id })).body.error.code).toBe("not_pending");
+    const again = await scan("POST", "/review-intake/batches", batch([{ ...msg(), message_ts: (await q("select message_ts from review_suggestions where id = $1", [s.id]))[0].message_ts, title: "Overwritten?" }]));
     expect(again.body.unchanged_count).toBe(1);
-    expect((await cur(s.id))).toMatchObject({ status: "planned", fields: { title: "Refresh the gift guide hero" } });
+    expect((await cur(s.id))).toMatchObject({ status: "planned", fields: { title: "Refresh the gift guide hero image" } });
 
-    // Publishing the plan is what sends it: one task, approved fields only.
-    const p2 = (await owner("GET", `/planning/plans/${draft.id}`)).body.plan;
-    expect((await owner("POST", `/planning/plans/${draft.id}/publish`, { version: p2.version })).status).toBe(200);
+    // Publishing the plan sends nothing for it; the published plan shows the item to the team.
+    plan = (await owner("GET", `/planning/plans/${draft.id}`)).body.plan;
+    const preview = (await owner("POST", `/planning/plans/${draft.id}/preview`)).body;
+    expect(preview.items).toEqual([]);
+    expect(preview.kept.map((k: any) => k.title)).toEqual(["Refresh the gift guide hero image"]);
+    const published = await owner("POST", `/planning/plans/${draft.id}/publish`, { version: plan.version });
+    expect(published.status).toBe(200);
+    expect(published.body.results).toEqual([]);
+    expect(tracker.creates).toBe(0);
+    expect((await cur(s.id)).plan).toMatchObject({ status: "published", item: { delivery: "not_sent", send: false } });
+  });
+
+  it("Send to Task Tracker is optional: when ticked it needs brand, assignee and due date, and the plan sends it when published", async () => {
+    const draft = (await owner("POST", "/planning/plans", planBody("Synthetic send plan"))).body.plan;
+    const s = await fresh("Book the florist photo shoot");
+    const v = (await cur(s.id)).version;
+    const inc = await toPlan(s.id, v, "Book the florist photo shoot", { plan_id: draft.id, send_to_tracker: true, tracker_assignee_id: THAO });
+    expect(inc.status).toBe(422);
+    expect(inc.body.error.code).toBe("incomplete");
+    // A person who doesn't work in the brand is refused.
+    expect((await toPlan(s.id, v, "Book the florist photo shoot", { plan_id: draft.id, send_to_tracker: true, tracker_brand_id: SB_BRAND, tracker_assignee_id: OMAR, due_date: "2026-12-04" })).body.error.code).toBe("invalid_assignee");
+    const ok = await toPlan(s.id, v, "Book the florist photo shoot", { plan_id: draft.id, send_to_tracker: true, tracker_brand_id: SB_BRAND, tracker_assignee_id: THAO, due_date: "2026-12-04" });
+    expect(ok.status).toBe(200);
+    expect(ok.body.suggestion).toMatchObject({ fields: { assignee: { id: THAO, name: "Thao" } }, plan: { item: { send: true } } });
+    expect(tracker.creates).toBe(0);
+    const plan = (await owner("GET", `/planning/plans/${draft.id}`)).body.plan;
+    expect((await owner("POST", `/planning/plans/${draft.id}/publish`, { version: plan.version })).status).toBe(200);
     expect(tracker.creates).toBe(1);
-    expect(tracker.bodies.at(-1)).toMatchObject({ title: "Refresh the gift guide hero", plan_id: draft.id });
+    expect(tracker.bodies.at(-1)).toMatchObject({ title: "Book the florist photo shoot", plan_id: draft.id });
     expect(JSON.stringify(tracker.bodies)).not.toMatch(/Synthetic: please|slack\.com/);
     expect((await cur(s.id)).plan).toMatchObject({ status: "published", item: { delivery: "created" } });
+  });
+
+  it("a new draft plan can be made from the popup, linked to the suggestion's occasion", async () => {
+    const s = await fresh("Valentine's 2027 bundle banner");
+    const v = (await cur(s.id)).version;
+    const bad = await toPlan(s.id, v, "Valentine's bundle banner", { new_plan: { name: "Bad dates", prep_start: "2027-02-01", campaign_start: "2027-01-01", campaign_end: "2027-02-14" } });
+    expect(bad.status).toBe(400);
+    expect((await toPlan(s.id, v, "x", { plan_id: "00000000-0000-4000-8000-000000000000", new_plan: { name: "Both", prep_start: "2026-12-01", campaign_start: "2027-01-01", campaign_end: "2027-02-14" } })).status).toBe(400);
+    const r = await toPlan(s.id, v, "Valentine's bundle banner", { new_plan: { name: "Valentine's Day 2027", prep_start: "2026-12-12", campaign_start: "2027-01-31", campaign_end: "2027-02-14", occasion: { id: "valentines-day", year: 2027 } } });
+    expect(r.status).toBe(200);
+    const plan = (await owner("GET", `/planning/plans/${r.body.plan_id}`)).body.plan;
+    expect(plan).toMatchObject({ name: "Valentine's Day 2027", status: "draft", business_id: "sb", occasion: { kind: "gift", id: "valentines-day", year: 2027 } });
+    expect(plan.assignments.map((a: any) => [a.title, a.send])).toEqual([["Valentine's bundle banner", false]]);
+    expect((await owner("DELETE", `/planning/plans/${plan.id}`)).status).toBe(200);   // keep the later timeline tests' window clean
   });
 
   it("removed from its plan, it can return to the review list", async () => {
     const draft = (await owner("POST", "/planning/plans", planBody("Synthetic plan to delete"))).body.plan;
     const s = await fresh("Order sample ribbons");
-    await fill(s.id);
     let c = await cur(s.id);
-    await owner("POST", `/review/suggestions/${s.id}/add-to-plan`, { version: c.version, plan_id: draft.id });
+    expect((await toPlan(s.id, c.version, "Order sample ribbons", { plan_id: draft.id })).status).toBe(200);
     c = await cur(s.id);
     expect((await owner("POST", `/review/suggestions/${s.id}/return`, { version: c.version })).body.error.code).toBe("still_planned");
     expect((await owner("DELETE", `/planning/plans/${draft.id}`)).status).toBe(200);
@@ -366,6 +406,52 @@ describe("Add to plan", () => {
     expect(c).toMatchObject({ status: "planned", plan: { item: null } });
     const back = await owner("POST", `/review/suggestions/${s.id}/return`, { version: c.version });
     expect(back.body.suggestion).toMatchObject({ status: "pending", plan: null, locked: false });
+    expect(tracker.creates).toBe(0);
+  });
+});
+
+describe("bulk actions", () => {
+  const planBody = (name: string) => ({ business_id: "sb", name, prep_start: "2026-11-20", campaign_start: "2026-12-01", campaign_end: "2026-12-10" });
+  const make = async (titles: string[]) => {
+    await scan("POST", "/review-intake/batches", batch(titles.map((title) => msg({ title }))));
+    const all = await first();
+    return titles.map((t) => all.find((i: any) => i.fields.title === t));
+  };
+  const refs = async (ids: string[]) => Promise.all(ids.map(async (id) => ({ id, version: (await owner("GET", `/review/suggestions/${id}`)).body.suggestion.version })));
+  const bulk = async (action: string, ids: string[]) => owner("POST", "/review/suggestions/bulk-status", { action, items: await refs(ids) });
+
+  it("sets the status of several rows at once; a row that can't change is reported and left as it is", async () => {
+    const [a, b, c] = await make(["Bulk synthetic one", "Bulk synthetic two", "Bulk synthetic three"]);
+    // c is already a task: it can't be resolved or dismissed here.
+    await fill(c.id);
+    expect((await owner("POST", `/review/suggestions/${c.id}/create`, { version: (await owner("GET", `/review/suggestions/${c.id}`)).body.suggestion.version })).body.outcome).toBe("created");
+    const r = await bulk("resolve", [a.id, b.id, c.id]);
+    expect(r.status).toBe(200);
+    expect(r.body.results.map((x: any) => [x.ok, x.suggestion?.status])).toEqual([[true, "resolved"], [true, "resolved"], [false, "approved"]]);
+    expect(r.body.results[2].message).toMatch(/already a Task Tracker task/);
+
+    // Back to review, then dismiss both; a stale version is refused for that row only.
+    expect((await bulk("reopen", [a.id, b.id])).body.results.map((x: any) => x.suggestion.status)).toEqual(["pending", "pending"]);
+    const items = await refs([a.id, b.id]);
+    const d = await owner("POST", "/review/suggestions/bulk-status", { action: "dismiss", items: [items[0], { ...items[1], version: items[1].version - 1 }] });
+    expect(d.body.results.map((x: any) => [x.ok, x.suggestion.status])).toEqual([[true, "dismissed"], [false, "pending"]]);
+    // Back to review never applies to a task.
+    expect((await bulk("reopen", [c.id])).body.results[0]).toMatchObject({ ok: false });
+    expect((await owner("POST", "/review/suggestions/bulk-status", { action: "resolve", items: [] })).status).toBe(400);
+    expect((await req("manager@example.test", "POST", "/review/suggestions/bulk-status", { action: "resolve", items: await refs([a.id]) })).status).toBe(404);
+  });
+
+  it("adds several suggestions to one plan, each with its own fields, kept in the dashboard", async () => {
+    const draft = (await owner("POST", "/planning/plans", planBody("Synthetic bulk plan"))).body.plan;
+    const [a, b, c] = await make(["Bulk plan item one", "Bulk plan item two", "Bulk plan item three"]);
+    await fill(a.id, { due_date: "2026-12-05" });
+    await bulk("dismiss", [c.id]);
+    const r = await owner("POST", "/review/suggestions/bulk-add-to-plan", { business_id: "sb", plan_id: draft.id, items: await refs([a.id, b.id, c.id]) });
+    expect(r.status).toBe(200);
+    expect(r.body.results.map((x: any) => x.ok)).toEqual([true, true, false]);
+    const plan = (await owner("GET", `/planning/plans/${draft.id}`)).body.plan;
+    expect(plan.assignments.map((x: any) => [x.title, x.send, x.assignee?.name ?? null, x.due_date])).toEqual([
+      ["Bulk plan item one", false, "Thao", "2026-12-05"], ["Bulk plan item two", false, null, null]]);
     expect(tracker.creates).toBe(0);
   });
 });

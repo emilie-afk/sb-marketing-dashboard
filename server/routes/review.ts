@@ -2,7 +2,7 @@
 import type { Router } from "../router";
 import { badRequest, readJson } from "../http";
 import { z } from "zod";
-import { assertReviewer, pendingCount, listSuggestions, getSuggestion, editSuggestion, editSchema, previewSuggestion, addToPlanSchema, addToPlan, planChoices, returnToReview, createFromSuggestion, dismissSuggestion, refreshSuggestion, resolveSuggestion, classifySuggestion, classifySchema } from "../review";
+import { assertReviewer, pendingCount, listSuggestions, getSuggestion, editSuggestion, editSchema, previewSuggestion, addToPlanSchema, addToPlan, planChoices, bulkAddSchema, bulkAddToPlan, bulkStatusSchema, bulkStatus, reopenSuggestion, returnToReview, createFromSuggestion, dismissSuggestion, refreshSuggestion, resolveSuggestion, classifySuggestion, classifySchema } from "../review";
 import { pendingCorporateCount, listDrafts, editDraft, draftEditSchema, bulkAssign, bulkAssignSchema, sendDrafts, dismissDraft, refreshDrafts, getDraft, resolveDraft, resolveSchema, listCheckoffs, markCheckoffsDone, markDoneSchema, routeCheckoff, routeSchema, followUpCheckoffs, followUpSchema } from "../corporateTasks";
 
 const version = z.object({ version: z.number().int().min(1) }).strict();
@@ -50,11 +50,32 @@ export function registerReview(r: Router) {
     return { suggestion: await classifySuggestion(session, params.id, v.data) };
   }, "viewer");
   r.get("/review/suggestions/:id/plans", async ({ params, session }) => planChoices(session, params.id));
+  r.get("/review/plan-choices", async ({ session }) => planChoices(session));
+  const issue = (e: z.ZodError, what: string) => badRequest(`${e.issues[0]?.path.join(".") || what}: ${e.issues[0]?.message ?? "invalid"}`);
   r.post("/review/suggestions/:id/add-to-plan", async ({ req, params, session }) => {
     assertReviewer(session);
     const v = addToPlanSchema.safeParse(await readJson(req));
-    if (!v.success) throw badRequest("version and plan_id are required.");
-    return { suggestion: await addToPlan(session, params.id, v.data) };
+    if (!v.success) throw issue(v.error, "plan");
+    return addToPlan(session, params.id, v.data);
+  }, "viewer");
+  // Bulk actions on selected rows (each row keeps its own rules; refusals are reported per row).
+  r.post("/review/suggestions/bulk-status", async ({ req, session }) => {
+    assertReviewer(session);
+    const v = bulkStatusSchema.safeParse(await readJson(req));
+    if (!v.success) throw issue(v.error, "selection");
+    return bulkStatus(session, v.data);
+  }, "viewer");
+  r.post("/review/suggestions/bulk-add-to-plan", async ({ req, session }) => {
+    assertReviewer(session);
+    const v = bulkAddSchema.safeParse(await readJson(req));
+    if (!v.success) throw issue(v.error, "plan");
+    return bulkAddToPlan(session, v.data);
+  }, "viewer");
+  r.post("/review/suggestions/:id/reopen", async ({ req, params, session }) => {
+    assertReviewer(session);
+    const v = version.safeParse(await readJson(req));
+    if (!v.success) throw badRequest("version is required.");
+    return { suggestion: await reopenSuggestion(session, params.id, v.data.version) };
   }, "viewer");
   r.post("/review/suggestions/:id/return", async ({ req, params, session }) => {
     assertReviewer(session);

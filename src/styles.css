@@ -158,6 +158,8 @@ a.more { font-size: 11px; font-weight: 700; }
 
 /* Stacked form fields (Slack Review edit form) */
 .stack-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: var(--muted); }
+.stack-form label.check, label.check { flex-direction: row; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); }
+.stack-form label.check input, label.check input { width: auto; margin: 0; }
 .stack-form label input, .stack-form label select, .stack-form label textarea { width: 100%; box-sizing: border-box; font-weight: 400; color: var(--ink, inherit); font-size: 14px; }
 
 /* Marketing Calendar: year at a glance (four quarters of three months; stacked on small screens) */
@@ -185,6 +187,9 @@ a.more { font-size: 11px; font-weight: 700; }
 .status-menu .menu button:hover, .status-menu .menu button:focus-visible { background: var(--cream); }
 .status-menu .menu button:disabled { opacity: .5; cursor: default; }
 .review-table tr.changed { background: #f4faf7; }
+.review-table tr.selected { background: var(--brand-pale); }
+.review-table th.pick, .review-table td.pick { width: 28px; padding-right: 0; }
+.bulk-bar { position: sticky; top: 0; z-index: 5; background: var(--page); border: var(--border); border-radius: 10px; padding: 8px 10px; margin: 8px 0; flex-wrap: wrap; }
 .linkish { background: none; border: 0; padding: 0; color: var(--brand-deep); text-decoration: underline; cursor: pointer; font: inherit; text-align: left; }
 .picker { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; max-height: 55vh; overflow-y: auto; }
 .picker .pick { width: 100%; text-align: left; display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; background: #fff; border: var(--border); border-radius: 8px; padding: 6px 8px; cursor: pointer; font: inherit; color: var(--ink); }
