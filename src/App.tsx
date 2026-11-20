@@ -71,8 +71,12 @@ function StatusPill() {
   if (!s.data) return null;
   const n = s.data.staleCount;
   const lastOk = s.data.sources.map((x: any) => x.last_success_at).filter(Boolean).sort().pop();
-  return <a href="#/settings" className={`status-pill ${n ? "warn" : ""}`} title={`Last successful update: ${when(lastOk)}`}>
-    <span className={`dot ${n ? "warn" : ""}`} />{n ? `${n} source${n === 1 ? "" : "s"} need attention` : "Sources up to date"}</a>;
+  const wk = s.data.weekly;
+  // Missing weekly figures are named first: a sync that ran but brought nothing is not "up to date".
+  const text = wk?.missing?.length ? `Weekly figures for ${wk.week.label} not received` : n ? `${n} source${n === 1 ? "" : "s"} need attention` : "Sources up to date";
+  const title = wk?.missing?.length ? `Missing for ${wk.week.label}: ${wk.missing.join("; ")}. Last successful update: ${when(lastOk)}` : `Last successful update: ${when(lastOk)}`;
+  return <a href="#/settings" className={`status-pill ${n ? "warn" : ""}`} title={title}>
+    <span className={`dot ${n ? "warn" : ""}`} />{text}</a>;
 }
 
 function SignIn({ error }: { error: string | null }) {

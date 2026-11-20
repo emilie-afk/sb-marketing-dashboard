@@ -270,7 +270,7 @@ describe("job flow", () => {
   it("Content Intelligence stays inactive", async () => {
     expect((await q("select status from source_connections where id = 'blocked.content_intelligence'"))[0].status).toBe("blocked");
     const s = (await call("viewer", "GET", "/settings")).body;
-    expect(s.pulls.map((p: any) => p.kind).sort()).toEqual(["corporate_gifting", "gross_profit", "plant_breakdown", "task_tracker"]);
+    expect(s.pulls.map((p: any) => p.kind).sort()).toEqual(["corporate_gifting", "gross_profit", "perksradar", "plant_breakdown", "task_tracker"]);
     expect(s.sources.some((x: any) => x.id === "blocked.gross_profit" || x.id === "blocked.corporate_gifting")).toBe(false);
   });
 });

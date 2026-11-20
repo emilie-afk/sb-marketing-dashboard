@@ -113,6 +113,18 @@ export function formatRange(r: DateRange) {
   return `${MONTHS[a.m - 1]} ${a.d}, ${a.y} to ${MONTHS[b.m - 1]} ${b.d}, ${b.y}`;
 }
 
+/**
+ * The latest Saturday–Friday reporting week whose figures are due by `today`: the weekly report runs on Monday, so a
+ * week is due from the Tuesday after it ends (Friday + 4 days).
+ */
+export function dueReportWeek(today: string): DateRange {
+  const dow = new Date(`${today}T00:00:00Z`).getUTCDay();          // 0 Sunday … 5 Friday, 6 Saturday
+  let friday = addDays(today, -((dow + 2) % 7));                       // this week's or the latest Friday
+  if (friday >= today) friday = addDays(friday, -7);
+  if (addDays(friday, 4) > today) friday = addDays(friday, -7);
+  return { start: addDays(friday, -6), end: friday };
+}
+
 /** Today's date in a given IANA timezone (operational deadlines use Vietnam time). */
 export function todayIn(tz: string, now = new Date()): string {
   const f = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });

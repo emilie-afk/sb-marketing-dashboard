@@ -10,8 +10,10 @@
 import type { Sheet, Cell } from "./calendarParse";
 import { daysInMonth } from "./dates";
 
-export type MetricObs = { metric: string; scope: string; scope_label?: string; period_start: string; period_end: string; granularity: "day" | "month"; value: number };
+export type MetricObs = { metric: string; scope: string; scope_label?: string; period_start: string; period_end: string; granularity: "day" | "week" | "month"; value: number };
 export type MonthBatch = { business: "sb" | "p2s"; month: string; observations: MetricObs[]; notes: string[] };
+/** One Saturday–Friday week column of the scorecard (start/end are the week's dates). */
+export type WeekBatch = { business: "sb" | "p2s"; start: string; end: string; observations: MetricObs[]; notes: string[] };
 
 /** `row`: a regular expression source in `daily`, an exact key in `monthly`. */
 type Channel = { scope: string; row: string; label: string };
@@ -175,6 +177,52 @@ export function adPlatform(name: string): { key: string; label: string } | null 
   return { key, label: `${name.trim().replace(/\b\w/g, (c) => c.toUpperCase())} Ads` };
 }
 
+/** Reads one scorecard column into "<section key>|<row label, lower-case>" → number (blank / error → null). */
+function readColumn(rows: Cell[][], c: number, sections: { key: string; re: RegExp }[]) {
+  let section = "";
+  const val: Record<string, number | null> = {};
+  const rowName: Record<string, string> = {};
+  for (const row of rows) {
+    const a = label(row?.[0]), b = label(row?.[1]);
+    if (a) section = sections.find((s) => s.re.test(a))?.key ?? a.toLowerCase();
+    if (!b) continue;
+    val[`${section}|${b.toLowerCase()}`] = amount(row[c]);
+    rowName[`${section}|${b.toLowerCase()}`] = b;
+  }
+  return { val, rowName };
+}
+
+/**
+ * Ad spend from one column: one figure per platform (rows naming the same platform must agree, else that platform is
+ * left out and noted), the first business's total (only when a platform row is filled: the total is a formula that
+ * shows 0 for an empty column) and the second business's ad row.
+ */
+function adSpend(L: ScorecardLayout["monthly"], col: { val: Record<string, number | null>; rowName: Record<string, string> }, adRow: RegExp, when: string) {
+  const platforms: { scope: string; label: string; v: number }[] = [];
+  const notes: string[] = [];
+  let anyPlatform = false;
+  const byKey = new Map<string, { label: string; filled: { row: string; v: number }[] }>();
+  const prefix = `${L.adSection}|`;
+  for (const [k, v] of Object.entries(col.val)) {
+    if (!k.startsWith(prefix)) continue;
+    const m = adRow.exec(k.slice(prefix.length));
+    if (!m) continue;
+    const p = adPlatform(m[1]);
+    if (!p) continue;
+    const g = byKey.get(p.key) ?? { label: p.label, filled: [] };
+    byKey.set(p.key, g);
+    if (v !== null && v !== undefined) { g.filled.push({ row: col.rowName[k] ?? k, v }); anyPlatform = true; }
+  }
+  for (const [key, g] of byKey) {
+    if (!g.filled.length) continue;
+    const first = g.filled[0].v;
+    if (g.filled.every((x) => Math.abs(x.v - first) < 0.005)) platforms.push({ scope: `platform:${key}`, label: g.label, v: first });
+    else notes.push(`${g.label} for ${when} left out: the scorecard rows disagree (${g.filled.map((x) => `${x.row} ${x.v}`).join(" vs ")}). Keep one row filled for this platform.`);
+  }
+  const total = anyPlatform ? col.val[L.adTotal] : null;
+  return { platforms, total: total ?? null, p2s: col.val[L.p2sAd] ?? null, notes };
+}
+
 /**
  * Monthly scorecard → month totals, for months that have ended and have an all-business revenue figure.
  * Revenue (first business = all minus the excluded and second-business rows; layout channels; second business), the
@@ -198,16 +246,7 @@ export function parseEosMonths(sheets: Sheet[], layout: ScorecardLayout, opts: {
       if (!mon) continue;
       const start = `${year}-${pad(mon)}-01`, end = `${year}-${pad(mon)}-${pad(daysInMonth(year, mon))}`;
       if (end >= opts.today) continue;                       // the month has not ended: its column is not final
-      let section = "";
-      const val: Record<string, number | null> = {};
-      const rowName: Record<string, string> = {};
-      for (const row of sh.rows) {
-        const a = label(row?.[0]), b = label(row?.[1]);
-        if (a) section = sections.find((s) => s.re.test(a))?.key ?? a.toLowerCase();
-        if (!b) continue;
-        val[`${section}|${b.toLowerCase()}`] = amount(row[c]);
-        rowName[`${section}|${b.toLowerCase()}`] = b;
-      }
+      const col = readColumn(sh.rows, c, sections), val = col.val;
       const all = val[L.revenueAll];
       if (all === null || all === undefined) continue;
       const sb: MetricObs[] = [], p2s: MetricObs[] = [];
@@ -220,36 +259,81 @@ export function parseEosMonths(sheets: Sheet[], layout: ScorecardLayout, opts: {
       if (p2sRev !== null) add(sb, "revenue", "all", all - excludedRev - (p2sRev ?? 0), layout.totals.sb);
       for (const ch of L.channels) add(sb, "revenue", ch.scope, val[ch.row], ch.label);
       for (const f of L.funnel) add(sb, f.metric, "all", val[f.row]);
-      // Every per-platform ad row is that platform's month spend. Rows that name the same platform (e.g. "Facebook" and
-      // "Meta") give ONE total per platform and month: filled rows that agree count once; filled rows that disagree are never
-      // added together or picked between: that platform's total is left out for the month and the conflict is noted.
-      let anyPlatform = false;
-      const notes: string[] = [];
-      const byKey = new Map<string, { label: string; filled: { row: string; v: number }[] }>();
-      const prefix = `${L.adSection}|`;
-      for (const [k, v] of Object.entries(val)) {
-        if (!k.startsWith(prefix)) continue;
-        const m = adRow.exec(k.slice(prefix.length));
-        if (!m) continue;
-        const p = adPlatform(m[1]);
-        if (!p) continue;
-        const g = byKey.get(p.key) ?? { label: p.label, filled: [] };
-        byKey.set(p.key, g);
-        if (v !== null && v !== undefined) { g.filled.push({ row: rowName[k] ?? k, v }); anyPlatform = true; }
-      }
-      for (const [key, g] of byKey) {
-        if (!g.filled.length) continue;
-        const first = g.filled[0].v;
-        if (g.filled.every((x) => Math.abs(x.v - first) < 0.005)) add(sb, "ad_spend", `platform:${key}`, first, g.label);
-        else notes.push(`${g.label} for ${start.slice(0, 7)} left out: the scorecard rows disagree (${g.filled.map((x) => `${x.row} ${x.v}`).join(" vs ")}). Keep one row filled for this platform.`);
-      }
-      // The total row is a formula that shows 0 for an empty month, so it is only used when a platform is filled in.
-      if (anyPlatform) add(sb, "ad_spend", "all", val[L.adTotal], layout.totals.sb);
+      // Every per-platform ad row is that platform's month spend; rows naming the same platform give ONE total.
+      const ads = adSpend(L, col, adRow, start.slice(0, 7));
+      const notes = ads.notes;
+      for (const p of ads.platforms) add(sb, "ad_spend", p.scope, p.v, p.label);
+      add(sb, "ad_spend", "all", ads.total, layout.totals.sb);
       add(p2s, "revenue", "all", p2sRev, layout.totals.p2s);
-      add(p2s, "ad_spend", "all", val[L.p2sAd], L.p2sAdLabel);
+      add(p2s, "ad_spend", "all", ads.p2s, L.p2sAdLabel);
       const month = start.slice(0, 7);
       if (sb.length) out.push({ business: "sb", month, observations: sb, notes });
       if (p2s.length) out.push({ business: "p2s", month, observations: p2s, notes: [] });
+    }
+  }
+  return out;
+}
+
+const WEEK_HEADER = /^([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})\s*[-–]\s*(?:([A-Za-z]{3})[a-z]*\.?\s+)?(\d{1,2})$/;
+const iso = (y: number, m: number, d: number) => `${y}-${pad(m)}-${pad(d)}`;
+const dayNo = (s: string) => Date.UTC(Number(s.slice(0, 4)), Number(s.slice(5, 7)) - 1, Number(s.slice(8, 10))) / 86400000;
+
+/**
+ * "Oct 31 - Nov 6", "Nov 7 - 13" (4th row) under a month group (3rd row, e.g. "NOV") → the week's dates, or null.
+ * The year comes from the tab; a week across New Year takes its year from the month group it sits under.
+ * Only 7-day spans are weeks (anything else is not a reporting week and is skipped).
+ */
+export function weekHeader(text: string, tabYear: number, groupMonth: number | null) {
+  const m = WEEK_HEADER.exec(text.replace(/\s+/g, " ").trim());
+  if (!m) return null;
+  const m1 = MONTHS[m[1].toLowerCase()], m2 = m[3] ? MONTHS[m[3].toLowerCase()] : m1;
+  if (!m1 || !m2) return null;
+  const d1 = Number(m[2]), d2 = Number(m[4]);
+  let y1 = tabYear, y2 = tabYear;
+  if (m1 === 12 && m2 === 1) { if (groupMonth === 1) y1 = tabYear - 1; else y2 = tabYear + 1; }
+  if (d1 > daysInMonth(y1, m1) || d2 > daysInMonth(y2, m2) || d1 < 1 || d2 < 1) return null;
+  const start = iso(y1, m1, d1), end = iso(y2, m2, d2);
+  return dayNo(end) - dayNo(start) === 6 ? { start, end } : null;
+}
+
+/**
+ * Scorecard week columns → weekly figures, for weeks that have ended: the funnel rates as reported and ad spend
+ * (first-business total and per platform; second business). These fill weeks the weekly report submission has not
+ * sent; where both have the same week, the dashboard uses the submission. Revenue is not read from week columns
+ * (daily figures cover it). Blank and error cells are skipped, never sent as zero.
+ */
+export function parseEosWeeks(sheets: Sheet[], layout: ScorecardLayout, opts: { fromYear?: number; today: string }): WeekBatch[] {
+  const L = layout.monthly;
+  const monthTotal = rx(L.monthTotal), sections = L.sections.map((s) => ({ key: s.key, re: rx(s.heading) })), adRow = rx(L.adPlatformRow);
+  const out: WeekBatch[] = [];
+  const seen = new Set<string>();
+  for (const sh of sheets) {
+    if (!/^\d{4}$/.test(sh.name.trim())) continue;
+    const year = Number(sh.name.trim());
+    if (year < (opts.fromYear ?? 2024)) continue;
+    const r3 = sh.rows[2] ?? [], r4 = sh.rows[3] ?? [];
+    const width = Math.max(r3.length, r4.length);
+    let group: number | null = null;
+    for (let c = 0; c < width; c++) {
+      const g = /^([A-Za-z]{3})/.exec(label(r3[c]));
+      if (g && MONTHS[g[1].toLowerCase()]) group = MONTHS[g[1].toLowerCase()];
+      if (monthTotal.test(label(r4[c]))) continue;
+      const w = weekHeader(label(r4[c]), year, group);
+      if (!w || w.end >= opts.today || seen.has(w.start)) continue;   // the week has not ended: its column is not final
+      seen.add(w.start);
+      const col = readColumn(sh.rows, c, sections);
+      const sb: MetricObs[] = [], p2s: MetricObs[] = [];
+      const add = (arr: MetricObs[], metric: string, scope: string, v: number | null | undefined, scope_label?: string) => {
+        if (v === null || v === undefined) return;
+        arr.push({ metric, scope, scope_label, period_start: w.start, period_end: w.end, granularity: "week", value: metric.endsWith("_rate") ? v : round2(v) });
+      };
+      for (const f of L.funnel) add(sb, f.metric, "all", col.val[f.row]);
+      const ads = adSpend(L, col, adRow, `${w.start} to ${w.end}`);
+      for (const p of ads.platforms) add(sb, "ad_spend", p.scope, p.v, p.label);
+      add(sb, "ad_spend", "all", ads.total, layout.totals.sb);
+      add(p2s, "ad_spend", "all", ads.p2s, L.p2sAdLabel);
+      if (sb.length) out.push({ business: "sb", start: w.start, end: w.end, observations: sb, notes: ads.notes });
+      if (p2s.length) out.push({ business: "p2s", start: w.start, end: w.end, observations: p2s, notes: [] });
     }
   }
   return out;

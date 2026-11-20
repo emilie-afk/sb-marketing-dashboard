@@ -17,6 +17,7 @@ import { pullPlantBreakdown, plantBreakdownConfigured, PB_SOURCE_ID } from "./ad
 import { pullGrossProfit, grossProfitConfigured, GP_SOURCE_ID } from "./adapters/grossProfit";
 import { pullCorporateGifting, corporateGiftingConfigured, corporateGiftingHeld, CG_SOURCE_ID } from "./adapters/corporateGifting";
 import { pullTaskTracker, taskTrackerConfigured, TT_SOURCE_ID } from "./adapters/taskTracker";
+import { pullPerksradar, perksradarConfigured, PR_SOURCE_ID } from "./adapters/perksradar";
 import { syncCorporateTasks } from "./corporateTasks";
 import { logServerError, redact } from "./redact";
 
@@ -29,12 +30,13 @@ export const BACKGROUND_PATH = "/.netlify/functions/sheet-sync-background";
 const SIG_HEADER = "x-mkd-job-signature";
 const TS_HEADER = "x-mkd-job-timestamp";
 
-export type PullKind = "plant_breakdown" | "gross_profit" | "corporate_gifting" | "task_tracker";
+export type PullKind = "plant_breakdown" | "gross_profit" | "corporate_gifting" | "task_tracker" | "perksradar";
 /** Reporting pulls from the team's other apps (read-only APIs, each with its own credential). */
 export const PULLS: Record<PullKind, { sourceId: string; label: string; configured: () => boolean; held?: () => string | null; run: (actor: string) => Promise<any> }> = {
   plant_breakdown: { sourceId: PB_SOURCE_ID, label: "Plant Revenue Breakdown", configured: plantBreakdownConfigured, run: (a) => pullPlantBreakdown(a) },
   gross_profit: { sourceId: GP_SOURCE_ID, label: "Gross Profit", configured: grossProfitConfigured, run: (a) => pullGrossProfit(a) },
   corporate_gifting: { sourceId: CG_SOURCE_ID, label: "Corporate Gifting", configured: corporateGiftingConfigured, held: corporateGiftingHeld, run: (a) => pullCorporateGifting(a) },
+  perksradar: { sourceId: PR_SOURCE_ID, label: "Perksradar", configured: perksradarConfigured, run: (a) => pullPerksradar(a) },
   // The hourly Task Tracker pull also reads Corporate Gifts task requests and reports delivery back (its own errors are
   // logged and never change the Task Tracker pull's result).
   task_tracker: { sourceId: TT_SOURCE_ID, label: "Task Tracker", configured: taskTrackerConfigured, run: async (a) => {

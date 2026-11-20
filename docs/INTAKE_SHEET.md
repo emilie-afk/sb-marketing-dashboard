@@ -70,3 +70,23 @@ Limits: 5 MB JSON; 5,000 observations or products, 1,000 campaigns or activities
 ## D. Connecting a scheduled task
 
 Add a final step to the task that appends its rows to the intake spreadsheet (or calls the API) after its existing outputs, so current outputs keep working. The task needs edit access to the intake spreadsheet only; the dashboard needs read access only.
+
+## E. Which figure is used when two sources have the same week
+
+The weekly report submission (this intake sheet or `POST /api/submissions`) is the authority for its weeks. The EOS
+scorecard's week columns are read too (funnel rates and ad spend for finished Saturday–Friday weeks, about the last six
+months; revenue comes from the daily workbook instead). They fill the weeks the weekly report has not sent:
+
+- Same metric, same week from both: the weekly report figure is used and the scorecard figure is ignored (never added).
+- Two different sources of the same rank for the same week still conflict, and the figure shows as missing with a reason.
+- A conversion rate is computed from the weekly report's session counts when they exist; otherwise the scorecard's rate
+  for exactly that week is shown as reported ("Week figure from the EOS scorecard").
+- A blank scorecard cell is never read as zero. The total ad spend row is used only when a platform row is filled.
+
+## F. "Weekly figures not received"
+
+From the Tuesday after each Saturday–Friday week, the dashboard checks that the week has Succulents Box ad spend,
+Succulents Box sessions or conversion rate, and P2S ad spend (from any source, as a week total or all seven days).
+Anything missing is named in the status chip and on the overview, instead of "Sources up to date". A card with no
+figure for the selected dates shows the latest earlier figure (up to about two months back), labelled with its own
+dates and not counted.

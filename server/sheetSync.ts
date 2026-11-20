@@ -5,7 +5,7 @@ import { one, query, tx } from "./db";
 import { HttpError } from "./http";
 import { SheetReader, sheetReader, ReadOptions } from "./sheetsReader";
 import { createHash } from "node:crypto";
-import { parseDailyAnalytics, parseEosMonths } from "../shared/scorecardParse";
+import { parseDailyAnalytics, parseEosMonths, parseEosWeeks } from "../shared/scorecardParse";
 import { scorecardLayout } from "./scorecardLayout";
 import { applyPulled } from "./adapters/pullApply";
 import { todayIn, OPERATIONS_TZ, addDays, daysInMonth } from "../shared/dates";
@@ -48,6 +48,8 @@ export async function runSheetSync(sourceId: string, trigger: "schedule" | "manu
 
 // The two figure workbooks are large (one formatted tab per month or year); only recent tabs and their top rows hold figures.
 const FIGURES_FROM_YEAR = 2025;
+/** How far back the scorecard's week columns are sent (about six months). */
+const WEEKS_BACK_DAYS = 183;
 function readOptions(role: SheetSource["role"]): ReadOptions | undefined {
   const recent = (n: string) => { const y = /(\d{4})\s*$/.exec(n.trim()); return !!y && Number(y[1]) >= FIGURES_FROM_YEAR; };
   if (role === "daily_analytics") return { tabs: recent, maxRows: 80 };
@@ -65,7 +67,10 @@ async function syncFigures(src: SheetSource, sheets: Sheet[], runId: string, act
   const daily = src.role === "daily_analytics";
   const layout = scorecardLayout();
   const batches = daily ? parseDailyAnalytics(sheets, layout, { fromYear: FIGURES_FROM_YEAR, through: addDays(today, -1) }) : parseEosMonths(sheets, layout, { fromYear: FIGURES_FROM_YEAR, today });
-  if (!batches.length) throw new HttpError(422, "no_figures", daily ? "No month tabs with daily figures were found." : "No finished month columns were found.");
+  // The scorecard's week columns (recent finished weeks only: older periods are answered by the month totals, and
+  // this keeps each hourly sync light).
+  const weeks = daily ? [] : parseEosWeeks(sheets, layout, { fromYear: FIGURES_FROM_YEAR, today }).filter((x) => x.start >= addDays(today, -WEEKS_BACK_DAYS));
+  if (!batches.length && !weeks.length) throw new HttpError(422, "no_figures", daily ? "No month tabs with daily figures were found." : "No finished month or week columns were found.");
   const who = daily ? { sourceId: "sheet.daily_analytics", submitter: `sheet:${src.id}`, submissionSource: "daily_analytics" }
     : { sourceId: "sheet.eos_scorecard", submitter: `sheet:${src.id}`, submissionSource: "eos_scorecard" };
   const receipts: any[] = [];
@@ -83,12 +88,29 @@ async function syncFigures(src: SheetSource, sheets: Sheet[], runId: string, act
     const r: any = await applyPulled(body, family, who, `sheet:${src.label}`);
     receipts.push({ label: `${b.business} ${b.month}`, outcome: r.outcome, submission_id: r.submission_id, notes: b.notes });
   }
+  // The scorecard's week columns: one submission per business and finished week (funnel rates and ad spend). They
+  // fill weeks the weekly report submission has not sent; where both have a week, the submission is used.
+  {
+    for (const w of weeks) {
+      const family = `eosw:${w.business}:${w.start}`;
+      const records = { observations: w.observations };
+      const hash = createHash("sha256").update(JSON.stringify(records)).digest("hex").slice(0, 16);
+      const body = {
+        schema_version: 1, submission_id: `${family}:${hash}`, source: who.submissionSource, business: w.business,
+        period: { start: w.start, end: w.end, granularity: "week", timezone: "America/Los_Angeles" },
+        collected_at: new Date().toISOString(), completeness: "complete", records,
+        source_refs: [{ label: `${src.label}: week ${w.start} to ${w.end}` }],
+      };
+      const r: any = await applyPulled(body, family, who, `sheet:${src.label}`);
+      receipts.push({ label: `${w.business} week ${w.start}`, outcome: r.outcome, submission_id: r.submission_id, notes: w.notes });
+    }
+  }
   const changed = receipts.filter((r) => r.outcome === "accepted").length, unchanged = receipts.filter((r) => r.outcome === "unchanged").length;
   const problems = receipts.filter((r) => r.outcome === "rejected" || r.outcome === "failed");
   const outcome = problems.length ? "partial" : "succeeded";
   await query(`update sync_runs set finished_at = now(), outcome = $2, tabs_read = $3, created_count = $4, unchanged_count = $5, review_count = $6, error = $7 where id = $1`,
     [runId, outcome, JSON.stringify(receipts.map((r) => ({ tab: r.label, kind: r.outcome, dataRows: 0, blank: false, skipped: r.notes.length ? redact(r.notes.join("; "), 500) : undefined }))), changed, unchanged, problems.length,
-      problems.length ? `${problems.length} month(s) rejected` : null]);
+      problems.length ? `${problems.length} month(s) or week(s) rejected` : null]);
   await query("update sheet_sources set last_success_at = now(), last_error = $2 where id = $1", [src.id, problems.length ? `${problems.length} month(s) rejected` : null]);
   await query("update source_connections set status = $2, last_success_at = now(), last_error = $3, updated_at = now() where id = $1", [who.sourceId, problems.length ? "failing" : "ok", problems.length ? `${problems.length} month(s) rejected` : null]);
   return { outcome, sync_run_id: runId, receipts };

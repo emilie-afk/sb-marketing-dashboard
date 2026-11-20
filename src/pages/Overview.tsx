@@ -11,7 +11,8 @@ export function Overview({ period, setPeriod }: { period: Period; setPeriod: (p:
       <>
         <PeriodBar start={d.period.start} end={d.period.end} compare={d.comparison?.kind ?? "none"} onChange={(a, b, c) => setPeriod({ start: a, end: b, compare: c })}
           note={`Showing ${d.period.label}${d.comparison ? `, compared with ${range(d.comparison)}` : ""}${d.comparison?.clamped ? " (month-end adjusted)" : ""}.`} />
-        {d.status.staleCount > 0 && <div className="notice">Some sources are outdated or failing, so parts of this page may be incomplete. See <a href="#/settings">Settings</a>.</div>}
+        {d.status.weekly?.missing?.length > 0 && <div className="notice">Weekly figures for {d.status.weekly.week.label} have not been received: {d.status.weekly.missing.join("; ")}. Cards that need them show Missing until the weekly report or the EOS scorecard's week column is filled in.</div>}
+        {d.status.staleCount > (d.status.weekly?.missing?.length ? 1 : 0) && <div className="notice">Some sources are outdated or failing, so parts of this page may be incomplete. See <a href="#/settings">Settings</a>.</div>}
 
         <Section n={1} title="Business performance" sub="Each business uses its own sources. No combined conversion rate, CPA or ROAS is calculated across businesses.">
           <div className="grid">{d.businesses.map((b: any) => <BusinessPanel key={b.id} b={b} />)}</div>

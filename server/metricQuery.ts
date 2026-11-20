@@ -35,9 +35,23 @@ export function withCompleteness(v: Fig, completeness: string[]): Fig {
 
 export type MetricResult = { key: string; label: string; unit: Unit; value: Fig & { display?: string }; coverage: CoverageResult; timezone: string | null; covered: DateRange | null };
 
+/**
+ * Which source a figure is taken from when more than one reports the same metric for the same period. Lower wins.
+ * The weekly report submission (intake sheet or API) is the authority for its weeks; the EOS scorecard's columns fill
+ * the weeks it hasn't sent. Two different sources of the same rank still conflict (never added, never picked between).
+ */
+const SOURCE_RANK: Record<string, number> = { "submission.api": 1, "sheet.intake": 1, "manual.upload": 1, "sheet.daily_analytics": 2, "sheet.eos_scorecard": 3 };
+const rankOf = (source: string) => SOURCE_RANK[source] ?? 2;
+export function preferSources<T extends { metric_key: string; period_start: string; period_end: string; granularity: any; source_id: string }>(rows: T[]): T[] {
+  const best = new Map<string, number>();
+  const key = (r: T) => `${r.metric_key}|${r.period_start}|${r.period_end}|${r.granularity}`;
+  for (const r of rows) { const k = key(r), v = rankOf(r.source_id); if (!best.has(k) || v < best.get(k)!) best.set(k, v); }
+  return rows.filter((r) => rankOf(r.source_id) === best.get(key(r)));
+}
+
 /** Base metric total over a range, or a typed reason why it cannot be given. */
 export function baseTotal(rows: ObsRow[], metric: string, range: DateRange): { value: Fig; coverage: CoverageResult; timezone: string | null; covered: DateRange | null } {
-  const mine = rows.filter((r) => r.metric_key === metric);
+  const mine = preferSources(rows.filter((r) => r.metric_key === metric));
   // The same figure for the same period from more than one source is never added together.
   const seen = new Map<string, Set<string>>();
   for (const r of mine.filter((r) => periodWithin({ start: r.period_start, end: r.period_end, granularity: r.granularity }, range))) {
@@ -92,20 +106,34 @@ export async function metricValue(business: string, key: string, scope: string, 
   }
   const n = baseTotal(rows, d.numerator!, range), m = baseTotal(rows, d.denominator!, range);
   const value = key === "cpa" ? purchaseCpa(n.value, m.value) : ratio(n.value, m.value);
+  // No counts for the range, but a rate reported for exactly this week (the EOS scorecard's week column): shown as
+  // reported. Counts, when they exist for the range, always win.
+  if (value.state === "missing" && key !== "cpa" && key !== "roas") {
+    const weekRate = preferSources(rows.filter((r) => r.metric_key === key && r.granularity === "week" && r.period_start === range.start && r.period_end === range.end));
+    if (weekRate.length === 1) {
+      const r = weekRate[0];
+      const v = withCompleteness({ state: r.value_state, value: r.value, note: "Week figure from the EOS scorecard" }, [r.completeness]);
+      return { key, label: d.label, unit: d.unit, value: v, coverage: { status: "supported", granularity: "week", periods: [{ start: r.period_start, end: r.period_end, granularity: "week" }], partial: false }, timezone: r.timezone, covered: range };
+    }
+  }
   return { key, label: d.label, unit: d.unit, value, coverage: n.coverage.status !== "supported" ? n.coverage : m.coverage, timezone: n.timezone ?? m.timezone, covered: n.covered };
 }
 
-export type Latest = { period: DateRange; granularity: string; value: Fig; outside: DateRange[] };
+export type Latest = { period: DateRange; granularity: string; value: Fig; outside: DateRange[]; earlier?: boolean };
 export type Compared = MetricResult & { prior: Fig; priorRange: DateRange | null; change: Change; partialNote?: string; latest?: Latest };
 
+/** How far back an earlier reported period is still offered as "latest reported" (about two months). */
+const EARLIER_DAYS = 62;
+
 /**
- * When a range can't be answered (e.g. the only week runs past it), the most recent reported period touching the
- * range, with its own dates, so the page can show it clearly labelled instead of a bare "Missing". It is never
- * counted toward the range. outside = the days of that period that fall outside the range.
+ * When a range can't be answered, the most recent reported figure, with its own dates, so the page can show it
+ * clearly labelled instead of a bare "Missing". It is never counted toward the range. First a period touching the
+ * range (outside = its days that fall outside the range); otherwise the latest whole period before the range
+ * (earlier = true), for example last week's ad spend when this week's has not arrived yet.
  */
 export async function latestFigure(business: string, key: string, scope: string, range: DateRange, cov: CoverageResult): Promise<Latest | undefined> {
-  if (cov.status !== "unsupported" || !cov.nearest?.length) return undefined;
-  const near = [...cov.nearest].sort((a, b) => (a.end < b.end ? 1 : -1));
+  if (cov.status !== "unsupported") return undefined;
+  const near = [...(cov.nearest ?? [])].sort((a, b) => (a.end < b.end ? 1 : -1));
   for (const p of near) {
     const r = await metricValue(business, key, scope, p);
     if (r.value.state === "value" && r.value.value !== null && r.coverage.status === "supported") {
@@ -114,6 +142,21 @@ export async function latestFigure(business: string, key: string, scope: string,
       if (p.end > range.end) outside.push({ start: addDays(range.end, 1), end: p.end });
       return { period: p, granularity: r.coverage.granularity, value: r.value, outside };
     }
+  }
+  if (near.length) return undefined;
+  const d = (await metricDefs()).get(key);
+  if (!d) return undefined;
+  const metrics = d.kind === "derived" ? [key, d.numerator!, d.denominator!] : [key];
+  const periods = await query<{ start: string; end: string }>(
+    `select distinct to_char(period_start,'YYYY-MM-DD') as start, to_char(period_end,'YYYY-MM-DD') as end
+       from observations where status = 'active' and business_id = $1 and metric_key = any($2) and scope_key = $3
+        and granularity in ('week', 'month') and period_end < $4 and period_end >= $5
+      order by 2 desc, 1 desc limit 6`,
+    [business, metrics, scope, range.start, addDays(range.start, -EARLIER_DAYS)]);
+  for (const p of periods) {
+    const r = await metricValue(business, key, scope, p);
+    if (r.value.state === "value" && r.value.value !== null && r.coverage.status === "supported")
+      return { period: p, granularity: r.coverage.granularity, value: r.value, outside: [], earlier: true };
   }
   return undefined;
 }
