@@ -24,11 +24,15 @@ function Queue() {
   const [patched, setPatched] = useState<Record<string, any>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ id: string; text: string } | null>(null);
+  const [bulkMsg, setBulkMsg] = useState<string | null>(null);
+  const [sel, setSel] = useState<Set<string>>(new Set());
   const [picker, setPicker] = useState<any | null>(null);
   const [pickErr, setPickErr] = useState<string | null>(null);
   const [taskFor, setTaskFor] = useState<any | null>(null);
   const [planFor, setPlanFor] = useState<any | null>(null);
+  const [bulkPlan, setBulkPlan] = useState<any[] | null>(null);
   const patch = (it: any, text?: string) => { setPatched((p) => ({ ...p, [it.id]: it })); if (text) setMsg({ id: it.id, text }); changed(); };
+  const patchMany = (list: any[]) => { setPatched((p) => { const n = { ...p }; for (const it of list) if (it) n[it.id] = it; return n; }); changed(); };
   const act = async (it: any, fn: () => Promise<any>, text?: string) => {
     setBusy(it.id); setMsg(null);
     try { const r = await fn(); if (r?.suggestion) patch(r.suggestion, text); }
@@ -38,11 +42,26 @@ function Queue() {
       setMsg({ id: it.id, text: e.message });
     } finally { setBusy(null); }
   };
-  const setFilter = (next: Record<string, string | null>) => { setPatched({}); setMsg(null); setQ(next); };
+  const setFilter = (next: Record<string, string | null>) => { setPatched({}); setMsg(null); setBulkMsg(null); setSel(new Set()); setQ(next); };
   const classify = async (it: any, body: any) => {
     setBusy(it.id); setPickErr(null);
     try { const r = await api<any>(`/review/suggestions/${it.id}/classify`, { method: "POST", json: { version: it.version, ...body } }); patch(r.suggestion); setPicker(null); }
     catch (e: any) { if (picker) setPickErr(e.message); else setMsg({ id: it.id, text: e.message }); } finally { setBusy(null); }
+  };
+  const rows: any[] = (s.data?.items ?? []).map((raw: any) => patched[raw.id] ?? raw);
+  const chosen = rows.filter((it) => sel.has(it.id));
+  const toggle = (id: string) => setSel((x) => { const n = new Set(x); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const DONE: Record<string, string> = { resolve: "resolved", dismiss: "dismissed", reopen: "back in To review" };
+  const bulk = async (action: "resolve" | "dismiss" | "reopen") => {
+    if (action === "dismiss" && !confirm(`Dismiss ${chosen.length} suggestion(s)? They won't come back in later scans.`)) return;
+    setBusy("bulk"); setBulkMsg(null); setMsg(null);
+    try {
+      const r = await api<any>("/review/suggestions/bulk-status", { method: "POST", json: { action, items: chosen.map((it) => ({ id: it.id, version: it.version })) } });
+      patchMany(r.results.map((x: any) => x.suggestion));
+      const ok = r.results.filter((x: any) => x.ok), bad = r.results.filter((x: any) => !x.ok);
+      setBulkMsg(`${ok.length} ${DONE[action]}.${bad.length ? ` ${bad.length} not changed: ${bad[0].message}` : ""}`);
+      setSel(new Set(bad.map((x: any) => x.id)));
+    } catch (e: any) { setBulkMsg(e.message); } finally { setBusy(null); }
   };
   return <div>
     <div className="toolbar">
@@ -53,11 +72,27 @@ function Queue() {
         <option value="all">All</option><option value="unclassified">Unclassified</option><option value="classified">Linked to an occasion</option></select></label>
       <input type="search" placeholder="Search suggestions" defaultValue={search} aria-label="Search suggestions" onKeyDown={(e) => { if (e.key === "Enter") setFilter({ q: (e.target as HTMLInputElement).value || null }); }} />
     </div>
-    <p className="sub">Private to you. Use the status button on a row to resolve, dismiss, add it to a task or to a draft plan, without leaving the queue. Only the task fields you approve are sent to Task Tracker; Slack text and links stay here. An occasion you confirm puts the suggestion on your Next two quarters timeline.</p>
+    <p className="sub">Private to you. Use the status button on a row, or tick several rows and set their status together, without leaving the queue. Add to plan keeps the item in the Marketing Dashboard; it goes to Task Tracker only if you choose to send it. Slack text and links stay here. An occasion you confirm puts the suggestion on your Next two quarters timeline.</p>
+    {sel.size > 0 && <div className="toolbar bulk-bar" aria-label="Bulk actions">
+      <b>{chosen.length} selected</b>
+      <span className="sub">Set status:</span>
+      <button className="btn small" disabled={busy === "bulk"} onClick={() => bulk("resolve")} title="Handled; no task">Resolve</button>
+      <button className="btn small" disabled={busy === "bulk"} onClick={() => bulk("dismiss")} title="No action needed; won't come back">Dismiss</button>
+      <button className="btn small" disabled={busy === "bulk"} onClick={() => bulk("reopen")} title="Dismissed or resolved items return to To review">Back to review</button>
+      <button className="btn small primary" disabled={busy === "bulk"} onClick={() => { setBulkMsg(null); setBulkPlan(chosen); }}>Add to plan…</button>
+      <button className="btn small" disabled={busy === "bulk"} onClick={() => setSel(new Set())}>Clear selection</button>
+      {busy === "bulk" && <span className="sub">Working…</span>}
+    </div>}
+    {bulkMsg && <div className="notice" role="status">{bulkMsg}</div>}
     <Async s={s}>{(d) => !d.items.length ? <div className="state">{status === "pending" ? "Nothing to review." : "No suggestions here."}</div> :
-      <div className="table-wrap"><table className="review-table"><thead><tr><th>Suggested task</th><th>Posted</th><th>Occasion</th><th>Business</th><th>Assignee</th><th>Deadline</th><th>Review</th><th>Task Tracker</th></tr></thead>
+      <div className="table-wrap"><table className="review-table"><thead><tr>
+        <th className="pick"><input type="checkbox" aria-label="Select all rows" checked={rows.length > 0 && rows.every((it) => sel.has(it.id))}
+          ref={(el) => { if (el) el.indeterminate = sel.size > 0 && !rows.every((it) => sel.has(it.id)); }}
+          onChange={(e) => setSel(e.target.checked ? new Set(rows.map((it) => it.id)) : new Set())} /></th>
+        <th>Suggested task</th><th>Posted</th><th>Occasion</th><th>Business</th><th>Assignee</th><th>Deadline</th><th>Review</th><th>Task Tracker</th></tr></thead>
         <tbody>{d.items.map((raw: any) => { const it = patched[raw.id] ?? raw;
-          return <tr key={it.id} className={patched[it.id] && it.status !== raw.status ? "changed" : undefined}>
+          return <tr key={it.id} className={[patched[it.id] && it.status !== raw.status ? "changed" : "", sel.has(it.id) ? "selected" : ""].join(" ").trim() || undefined}>
+            <td className="pick"><input type="checkbox" aria-label={`Select ${it.fields.title}`} checked={sel.has(it.id)} onChange={() => toggle(it.id)} /></td>
             <td><a href={`#/planning/review/${it.id}`}><b>{it.fields.title}</b></a>{it.needs.length > 0 && it.status === "pending" && <div className="sub">{it.needs.length} decision{it.needs.length === 1 ? "" : "s"} to make</div>}
               {msg?.id === it.id && <div className="sub" role="status">{msg?.text}</div>}</td>
             <td>{when(it.source.posted_at)}{it.source.is_reply && <div className="sub">Thread reply</div>}</td>
@@ -69,8 +104,8 @@ function Queue() {
               { label: "Resolve", hint: "Handled; no task", onClick: () => act(it, () => api(`/review/suggestions/${it.id}/resolve`, { method: "POST", json: { version: it.version } }), "Resolved.") },
               { label: "Dismiss", hint: "No action needed; won't come back", onClick: () => { if (confirm("Dismiss this suggestion? It won't come back in later scans.")) act(it, () => api(`/review/suggestions/${it.id}/dismiss`, { method: "POST", json: { version: it.version } }), "Dismissed."); } },
               { label: "Add to task", hint: "Confirm the fields, send to Task Tracker", onClick: () => setTaskFor(it) },
-              { label: "Add to plan", hint: "Into a private draft plan", onClick: () => setPlanFor(it) },
-            ]} /></td>
+              { label: "Add to plan", hint: "Into a draft plan; stays in the dashboard", onClick: () => setPlanFor(it) },
+            ]} onReopen={() => act(it, () => api(`/review/suggestions/${it.id}/reopen`, { method: "POST", json: { version: it.version } }), "Back in To review.")} /></td>
             <td><DeliveryCell it={it} busy={busy === it.id} onRetry={() => act(it, () => api(`/review/suggestions/${it.id}/create`, { method: "POST", json: { version: it.version } }), "Checked with Task Tracker.")}
               onResolve={() => act(it, () => api(`/review/suggestions/${it.id}/resolve`, { method: "POST", json: { version: it.version } }), "Resolved.")} /></td>
           </tr>; })}</tbody></table></div>}</Async>
@@ -78,13 +113,22 @@ function Queue() {
       busy={busy === picker.id} error={pickErr} onClose={() => setPicker(null)}
       onPick={(o, prep) => classify(picker, { occasion: o, prep_date: prep })} onClear={(prep) => classify(picker, { occasion: null, prep_date: prep })} />}
     {taskFor && <AddTaskDrawer it={taskFor} onClose={() => setTaskFor(null)} onDone={(it, text) => { setTaskFor(null); patch(it, text); }} />}
-    {planFor && <AddToPlanDrawer it={planFor} onClose={() => setPlanFor(null)} onDone={(it) => { setPlanFor(null); patch(it, "Added to the plan. It stays private until you publish the plan."); }} />}
+    {planFor && <AddToPlanDrawer it={planFor} onClose={() => setPlanFor(null)} onDone={(it, text) => { setPlanFor(null); patch(it, text); }} />}
+    {bulkPlan && <BulkPlanDrawer items={bulkPlan} onClose={() => setBulkPlan(null)} onDone={(r) => {
+      setBulkPlan(null); patchMany(r.items);
+      const bad = r.results.filter((x: any) => !x.ok);
+      setBulkMsg(`${r.results.length - bad.length} added to the plan (kept in the dashboard).${bad.length ? ` ${bad.length} not added: ${bad[0].message}` : ""}`);
+      setSel(new Set(bad.map((x: any) => x.id)));
+    }} />}
   </div>;
 }
 
 /** The review status: an action button while the suggestion is to review, a plain label otherwise. */
-function ReviewStatus({ it, busy, actions }: { it: any; busy: boolean; actions: MenuAction[] }) {
+function ReviewStatus({ it, busy, actions, onReopen }: { it: any; busy: boolean; actions: MenuAction[]; onReopen: () => void }) {
   if (it.status === "pending") return <StatusMenu label="To review" actions={actions} busy={busy} />;
+  // A dismissed or resolved suggestion (never a task) can go back to review.
+  if ((it.status === "dismissed" || it.status === "resolved") && ["not_sent", "failed"].includes(it.delivery.status))
+    return <StatusMenu label={STATUS[it.status]} tone="muted" busy={busy} actions={[{ label: "Back to review", hint: "Return it to To review", onClick: onReopen }]} />;
   return <span className={`chip ${it.status === "dismissed" || it.status === "resolved" ? "muted" : ""}`}>{STATUS[it.status]}</span>;
 }
 
@@ -161,35 +205,128 @@ function AddTaskDrawer({ it, onClose, onDone }: { it: any; onClose: () => void; 
   </Drawer>;
 }
 
-/** Add to plan: plans for the suggestion's confirmed occasion are offered first; a plan for another occasion is flagged. */
-function AddToPlanDrawer({ it, onClose, onDone }: { it: any; onClose: () => void; onDone: (it: any) => void }) {
+const addDaysStr = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 864e5).toISOString().slice(0, 10);
+type NewPlan = { name: string; prep_start: string; campaign_start: string; campaign_end: string };
+/** A new draft plan's defaults: for a linked occasion, the plan form's defaults (campaign two weeks before it, prep seven weeks before). */
+function newPlanFor(occ: any | null): NewPlan {
+  const d = occ?.dates;
+  if (occ && d?.start) return { name: `${occ.name} ${occ.year}`, prep_start: addDaysStr(d.start, -49), campaign_start: addDaysStr(d.start, -14), campaign_end: d.end };
+  return { name: occ ? `${occ.name} ${occ.year}` : "", prep_start: "", campaign_start: "", campaign_end: "" };
+}
+
+/** Choose a draft plan of the business, or make a new draft plan here. */
+function PlanTarget({ plans, business, occasion, value, onChange, np, setNp }: { plans: any[]; business: string; occasion: any | null; value: string; onChange: (v: string) => void; np: NewPlan; setNp: (n: NewPlan) => void }) {
+  const mine = plans.filter((p) => p.business_id === business);
+  const chosen = mine.find((p) => p.id === value);
+  const set = (k: keyof NewPlan) => (e: any) => setNp({ ...np, [k]: e.target.value });
+  return <>
+    <label>Plan<select aria-label="Plan" required value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">Choose a draft plan</option>
+      {mine.some((p) => p.match === "same") && <optgroup label={`For ${occasion.name} ${occasion.year}`}>{mine.filter((p) => p.match === "same").map((p) => <PlanOption key={p.id} p={p} />)}</optgroup>}
+      {mine.some((p) => p.match !== "same") && <optgroup label="Draft plans">{mine.filter((p) => p.match !== "same").map((p) => <PlanOption key={p.id} p={p} />)}</optgroup>}
+      <option value="new">＋ New draft plan…</option></select></label>
+    {chosen?.match === "different" && <div className="notice">This plan is for {chosen.occasion.name} {chosen.occasion.year}, but the suggestion is linked to {occasion.name} {occasion.year}. Add it anyway only if that is intended.</div>}
+    {value === "new" && <div className="card flat" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
+      <label style={{ gridColumn: "1 / -1" }}>New plan name<input aria-label="New plan name" required maxLength={200} value={np.name} onChange={set("name")} /></label>
+      <label>Prep start<input aria-label="Prep start" type="date" required value={np.prep_start} max={np.campaign_start || undefined} onChange={set("prep_start")} /></label>
+      <label>Campaign start<input aria-label="Campaign start" type="date" required value={np.campaign_start} onChange={set("campaign_start")} /></label>
+      <label>Campaign end<input aria-label="Campaign end" type="date" required value={np.campaign_end} min={np.campaign_start || undefined} onChange={set("campaign_end")} /></label>
+      <span className="sub" style={{ gridColumn: "1 / -1" }}>A private draft{occasion ? `, linked to ${occasion.name} ${occasion.year}` : ""}. Fill in the rest of the plan later.</span>
+    </div>}
+  </>;
+}
+const planBody = (business: string, value: string, np: NewPlan, occasion: any | null) =>
+  value === "new" ? { business_id: business, new_plan: { ...np, occasion: occasion ? { id: occasion.id, year: occasion.year } : null } } : { business_id: business, plan_id: value };
+const npReady = (np: NewPlan) => np.name.trim() && np.prep_start && np.campaign_start && np.campaign_end && np.prep_start <= np.campaign_start && np.campaign_start <= np.campaign_end;
+
+/**
+ * Add to plan: every detail is filled in here (title, brief, business, plan, assignee, due date). The item stays in the
+ * Marketing Dashboard; "Send to Task Tracker" is optional and then needs brand, assignee and due date.
+ */
+function AddToPlanDrawer({ it, onClose, onDone }: { it: any; onClose: () => void; onDone: (it: any, text: string) => void }) {
   const choices = useApi<any>(`/review/suggestions/${it.id}/plans`, [it.id]);
-  const [planId, setPlanId] = useState("");
+  const dir = useApi<any>("/planning/directory");
+  const f0 = it.fields;
+  const occasion = it.occasion.confirmed && it.occasion.current ? it.occasion.current : null;
+  const [f, setF] = useState({ title: f0.title, brief: f0.brief ?? "", business_id: f0.business_id ?? it.suggested.business ?? "", tracker_brand_id: f0.brand?.id ?? "", tracker_assignee_id: f0.assignee?.id ?? "", due_date: f0.due_date ?? "", send: false });
+  const [plan, setPlan] = useState("");
+  const [np, setNp] = useState<NewPlan>(() => newPlanFor(occasion));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const f = it.fields;
-  const chosen = choices.data?.plans.find((p: any) => p.id === planId);
+  const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.value });
+  const brands = useMemo(() => (dir.data?.brands ?? []).filter((b: any) => b.business_id === f.business_id), [dir.data, f.business_id]);
+  const brandId = f.tracker_brand_id || (brands.length === 1 ? brands[0].id : "");
+  // Without sending, anyone working on the business can be noted; to send, the person must work in the chosen brand.
+  const people = (dir.data?.people ?? []).filter((p: any) => f.send ? brandId && p.brand_ids.includes(brandId) : p.brand_ids.some((id: string) => brands.some((b: any) => b.id === id)));
+  const sendReady = !f.send || (brandId && f.tracker_assignee_id && f.due_date);
+  const ready = f.title.trim() && f.business_id && plan && (plan !== "new" || npReady(np)) && sendReady;
   const add = async () => {
     setBusy(true); setErr(null);
-    try { onDone((await api<any>(`/review/suggestions/${it.id}/add-to-plan`, { method: "POST", json: { version: it.version, plan_id: planId } })).suggestion); }
-    catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+    try {
+      const r = await api<any>(`/review/suggestions/${it.id}/add-to-plan`, { method: "POST", json: {
+        version: it.version, ...planBody(f.business_id, plan, np, occasion), title: f.title.trim(), brief: f.brief || null, send_to_tracker: f.send,
+        tracker_brand_id: f.send ? brandId : f.tracker_brand_id || null, tracker_assignee_id: f.tracker_assignee_id || null, due_date: f.due_date || null } });
+      onDone(r.suggestion, f.send ? "Added to the plan. It is sent to Task Tracker when you publish the plan." : "Added to the plan. It stays in the Marketing Dashboard.");
+    } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
   return <Drawer onClose={onClose}>
     <h2>Add to plan</h2>
-    <p className="sub">The task fields below become an item in one of your draft plans. Draft plans are private to you, and nothing is sent to Task Tracker until you publish the plan. The Slack text and links stay here.</p>
-    <dl className="kv"><dt>Title</dt><dd><b>{f.title}</b></dd><dt>Business</dt><dd>{f.business ?? "—"}</dd><dt>Assignee</dt><dd>{f.assignee ? `${f.assignee.name} (${f.brand?.name})` : "—"}</dd>
-      <dt>Due date</dt><dd>{fmtDate(f.due_date) || "—"}</dd><dt>Occasion</dt><dd>{it.occasion.confirmed && it.occasion.current ? `${it.occasion.current.name} ${it.occasion.current.year}` : "Not linked"}</dd></dl>
+    <p className="sub">Becomes an item in a draft plan, kept in the Marketing Dashboard. Nothing is sent to Task Tracker unless you tick “Send to Task Tracker”. The Slack text and links stay here.</p>
     {err && <div className="notice" role="alert">{err}</div>}
-    <Async s={choices}>{(d) => it.needs.length > 0 ? <div className="notice">Before adding it to a plan: {it.needs.join("; ")}. Use Add to task's fields, or open the suggestion to review and edit it.</div>
-      : !d.plans.length ? <div className="notice">No draft {f.business} plans yet. <a href="#/planning/new">Create a plan</a>, then come back.</div>
-      : <>
-        <label className="stack-form" style={{ display: "block" }}><span>Draft plan</span><select aria-label="Draft plan" value={planId} onChange={(e) => setPlanId(e.target.value)}>
-          <option value="">Choose a draft plan</option>
-          {d.plans.some((p: any) => p.match === "same") && <optgroup label={`For ${d.occasion.name} ${d.occasion.year}`}>{d.plans.filter((p: any) => p.match === "same").map((p: any) => <PlanOption key={p.id} p={p} />)}</optgroup>}
-          <optgroup label="Other draft plans">{d.plans.filter((p: any) => p.match !== "same").map((p: any) => <PlanOption key={p.id} p={p} />)}</optgroup></select></label>
-        {chosen?.match === "different" && <div className="notice">This plan is for {chosen.occasion.name} {chosen.occasion.year}, but the suggestion is linked to {d.occasion.name} {d.occasion.year}. Add it anyway only if that is intended.</div>}
-      </>}</Async>
-    <div className="row" style={{ marginTop: 10 }}><button className="btn primary" disabled={busy || it.needs.length > 0 || !planId} onClick={add}>Add to plan</button><button className="btn" onClick={onClose}>Cancel</button></div>
+    <form className="stack-form" style={{ display: "grid", gap: 8 }} onSubmit={(e) => { e.preventDefault(); if (ready && !busy) add(); }}>
+      <label>Title<input aria-label="Title" required maxLength={300} value={f.title} onChange={set("title")} /></label>
+      <label>Brief<textarea aria-label="Brief" rows={3} maxLength={1500} value={f.brief} onChange={set("brief")} /></label>
+      <label>Business<select aria-label="Business" required value={f.business_id} onChange={(e) => { setF({ ...f, business_id: e.target.value, tracker_brand_id: "", tracker_assignee_id: "" }); setPlan(""); }}>
+        <option value="">Choose</option>{Object.entries(BUSINESS_NAMES).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></label>
+      <div className="sub">Occasion: {occasion ? `${occasion.name} ${occasion.year}` : "not linked"}</div>
+      {f.business_id && <Async s={choices}>{(d) => <PlanTarget plans={d.plans} business={f.business_id} occasion={d.occasion} value={plan} onChange={setPlan} np={np} setNp={setNp} />}</Async>}
+      <label>Assignee {!f.send && <span className="sub">(optional)</span>}<select aria-label="Assignee" value={f.tracker_assignee_id} disabled={!f.business_id || !!dir.error} onChange={set("tracker_assignee_id")}>
+        <option value="">{f.send ? "Choose" : "Not set"}</option>{people.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+      {dir.error && <span className="sub">Task Tracker's people list could not be read, so no assignee can be chosen now.</span>}
+      <label>Due date {!f.send && <span className="sub">(optional)</span>}<input aria-label="Due date" type="date" value={f.due_date} onChange={set("due_date")} />
+        {!f.due_date && it.source.deadline_text && <span className="sub">Slack said “{it.source.deadline_text}”</span>}</label>
+      <label className="check" style={{ display: "flex" }}><input type="checkbox" aria-label="Send to Task Tracker" checked={f.send} disabled={!!dir.error}
+        onChange={(e) => setF({ ...f, send: e.target.checked, tracker_assignee_id: e.target.checked && brandId && !(dir.data?.people ?? []).some((p: any) => p.id === f.tracker_assignee_id && p.brand_ids.includes(brandId)) ? "" : f.tracker_assignee_id })} />
+        Send to Task Tracker when the plan is published</label>
+      {f.send && brands.length > 1 && <label>Task Tracker brand<select aria-label="Task Tracker brand" value={f.tracker_brand_id} onChange={(e) => setF({ ...f, tracker_brand_id: e.target.value, tracker_assignee_id: "" })}>
+        <option value="">Choose</option>{brands.map((b: any) => <option key={b.id} value={b.id}>{b.name}</option>)}</select></label>}
+      {f.send && !sendReady && <span className="sub">To send it, choose {[!brandId && "the brand", !f.tracker_assignee_id && "the assignee", !f.due_date && "the due date"].filter(Boolean).join(", ")}.</span>}
+      <div className="row" style={{ marginTop: 6 }}><button className="btn primary" disabled={busy || !ready}>{busy ? "Adding…" : "Add to plan"}</button><button type="button" className="btn" onClick={onClose}>Cancel</button></div>
+    </form>
+  </Drawer>;
+}
+
+/** Bulk Add to plan: the selected suggestions go into one draft plan as items kept in the dashboard, each with its own fields. */
+function BulkPlanDrawer({ items, onClose, onDone }: { items: any[]; onClose: () => void; onDone: (r: any) => void }) {
+  const choices = useApi<any>("/review/plan-choices");
+  const businesses = [...new Set(items.map((it) => it.fields.business_id ?? it.suggested.business).filter(Boolean))];
+  const occs = [...new Set(items.filter((it) => it.occasion.confirmed && it.occasion.current).map((it) => `${it.occasion.current.id}:${it.occasion.current.year}`))];
+  const occasion = occs.length === 1 && items.every((it) => it.occasion.confirmed) ? items[0].occasion.current : null;
+  const [business, setBusiness] = useState<string>(businesses.length === 1 ? businesses[0] : "");
+  const [plan, setPlan] = useState("");
+  const [np, setNp] = useState<NewPlan>(() => newPlanFor(occasion));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const notOpen = items.filter((it) => it.status !== "pending");
+  const ready = business && plan && (plan !== "new" || npReady(np));
+  const add = async () => {
+    setBusy(true); setErr(null);
+    try { onDone(await api<any>("/review/suggestions/bulk-add-to-plan", { method: "POST", json: { items: items.map((it) => ({ id: it.id, version: it.version })), ...planBody(business, plan, np, occasion) } })); }
+    catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return <Drawer onClose={onClose}>
+    <h2>Add {items.length} to a plan</h2>
+    <p className="sub">Each suggestion becomes an item with its own title, brief, assignee and due date, kept in the Marketing Dashboard. To send any of them to Task Tracker, tick “Send to Task Tracker” on the item in the plan.</p>
+    {notOpen.length > 0 && <div className="notice">{notOpen.length} selected suggestion(s) are not “To review” and will be skipped.</div>}
+    {err && <div className="notice" role="alert">{err}</div>}
+    <form className="stack-form" style={{ display: "grid", gap: 8 }} onSubmit={(e) => { e.preventDefault(); if (ready && !busy) add(); }}>
+      <label>Business<select aria-label="Business" required value={business} onChange={(e) => { setBusiness(e.target.value); setPlan(""); }}>
+        <option value="">Choose</option>{Object.entries(BUSINESS_NAMES).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></label>
+      {businesses.length > 1 && <span className="sub">The selection covers several businesses; assignees are kept only for suggestions of the business you choose.</span>}
+      {business && <Async s={choices}>{(d) => <PlanTarget plans={d.plans} business={business} occasion={occasion} value={plan} onChange={setPlan} np={np} setNp={setNp} />}</Async>}
+      <ul className="list">{items.map((it) => <li key={it.id}>{it.fields.title}{it.fields.due_date ? <span className="sub"> · due {fmtDate(it.fields.due_date)}</span> : null}</li>)}</ul>
+      <div className="row"><button className="btn primary" disabled={busy || !ready}>{busy ? "Adding…" : "Add to plan"}</button><button type="button" className="btn" onClick={onClose}>Cancel</button></div>
+    </form>
   </Drawer>;
 }
 const PlanOption = ({ p }: { p: any }) => <option value={p.id}>{p.name} ({fmtDate(p.campaign_start)} – {fmtDate(p.campaign_end)}){p.occasion ? ` · ${p.occasion.name} ${p.occasion.year}` : p.categories.length ? ` · ${p.categories.join(", ")}` : ""}</option>;
@@ -260,8 +397,8 @@ function SuggestionDetail({ id }: { id: string }) {
 
         {it.plan && <div className="notice">{it.plan.item
           ? <>In the {it.plan.status === "published" ? "published" : "draft"} plan <a href={`#/planning/${it.plan.id}`}><b>{it.plan.name}</b></a>{it.plan.status === "published"
-              ? <> — sent with the plan{it.plan.item.delivery === "created" ? " (task created)" : ""}.</>
-              : <> — private to you, not a task until you publish the plan. Change it in the plan.</>}</>
+              ? <>{it.plan.item.send ? <> — sent with the plan{it.plan.item.delivery === "created" ? " (task created)" : ""}.</> : <> — kept in the Marketing Dashboard (not sent to Task Tracker).</>}</>
+              : <> — private to you{it.plan.item.send ? ", sent to Task Tracker when you publish the plan" : ", kept in the Marketing Dashboard"}. Change it in the plan.</>}</>
           : <>Removed from its plan. You can bring it back to the review list.</>}</div>}
         {it.task && <p>Task Tracker: <span className="chip">{TASK[it.task.status] ?? it.task.status}</span> {it.task.as_of && <span className="sub">as of {when(it.task.as_of)}</span>} {it.task.open_url && <a href={it.task.open_url} target="_blank" rel="noopener noreferrer">Open in Task Tracker</a>}</p>}
         {it.delivery.error && it.status === "approved" && <div className="notice">{it.delivery.error}</div>}
@@ -272,6 +409,7 @@ function SuggestionDetail({ id }: { id: string }) {
           {!["dismissed", "planned", "resolved"].includes(it.status) && it.delivery.status !== "created" && <button className="btn small primary" disabled={busy} onClick={() => run(async () => setPreview(await api(`/review/suggestions/${id}/preview`, { method: "POST" })))}>
             {["failed", "unknown", "sending"].includes(it.delivery.status) ? "Retry creating the task" : "Create task"}</button>}
           {open && !it.locked && <button className="btn small" disabled={busy} onClick={() => run(() => api(`/review/suggestions/${id}/resolve`, { method: "POST", json: { version: it.version } }), "Resolved: handled, no task.")}>Resolve</button>}
+          {["dismissed", "resolved"].includes(it.status) && ["not_sent", "failed"].includes(it.delivery.status) && <button className="btn small" disabled={busy} onClick={() => run(() => api(`/review/suggestions/${id}/reopen`, { method: "POST", json: { version: it.version } }), "Back in To review.")}>Back to review</button>}
           {!it.locked && !["dismissed"].includes(it.status) && <button className="btn small" disabled={busy} onClick={() => { if (confirm("Dismiss this suggestion? It won't come back in later scans.")) run(() => api(`/review/suggestions/${id}/dismiss`, { method: "POST", json: { version: it.version } }), "Dismissed."); }}>Dismiss</button>}
           {(it.delivery.status === "created" || it.delivery.status === "unknown") && <button className="btn small" disabled={busy} onClick={() => run(() => api(`/review/suggestions/${id}/refresh`, { method: "POST" }), "Checked Task Tracker.")}>Check Task Tracker</button>}
         </div>
@@ -279,7 +417,7 @@ function SuggestionDetail({ id }: { id: string }) {
       </div>
       {picker && <OccasionPicker title={f.title} business={f.business_id ?? it.suggested.business} current={it.occasion.current} prepDate={it.occasion.prep_date} busy={busy} error={pickErr}
         onClose={() => setPicker(false)} onPick={(o, prep) => classify({ occasion: o, prep_date: prep })} onClear={(prep) => classify({ occasion: null, prep_date: prep })} />}
-      {planPick && <AddToPlanDrawer it={it} onClose={() => setPlanPick(false)} onDone={() => { setPlanPick(false); setMsg("Added to the plan. It stays private until you publish the plan."); s.reload(); changed(); }} />}
+      {planPick && <AddToPlanDrawer it={it} onClose={() => setPlanPick(false)} onDone={(_x, text) => { setPlanPick(false); setMsg(text); s.reload(); changed(); }} />}
       {preview && <Drawer onClose={() => setPreview(null)}>
         <h2>Create task</h2>
         <p className="sub">This exact task is created in Task Tracker. Nothing from Slack is sent. Creating it again never makes a second task.</p>

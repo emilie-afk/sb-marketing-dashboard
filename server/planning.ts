@@ -69,7 +69,7 @@ const PLAN_COLS = `p.id, p.business_id, p.name, p.gift_occasion_id, p.occurrence
   g.name gift_occasion_name, o.name sheet_occasion_name, to_char(o.occasion_date,'YYYY-MM-DD') sheet_occasion_date, pr.title promotion_title`;
 const PLAN_FROM = `marketing_plans p left join gift_occasions g on g.id = p.gift_occasion_id left join occasions o on o.id = p.sheet_occasion_id left join promotions pr on pr.id = p.promotion_id`;
 
-const ASG_COLS = `a.id, a.plan_id, a.sort_order, a.title, a.brief, a.tracker_brand_id, a.tracker_brand_name, a.tracker_assignee_id, a.tracker_assignee_name,
+const ASG_COLS = `a.id, a.plan_id, a.sort_order, a.title, a.brief, a.send_to_tracker, a.tracker_brand_id, a.tracker_brand_name, a.tracker_assignee_id, a.tracker_assignee_name,
   to_char(a.due_date,'YYYY-MM-DD') due_date, a.delivery_status, a.delivery_error, a.last_attempt_at, a.tracker_task_id, a.tracker_version, a.tracker_title,
   to_char(a.tracker_due_date,'YYYY-MM-DD') tracker_due_date, a.tracker_status, a.tracker_assignee_name_now, a.tracker_updated_at, a.tracker_read_at,
   r.status sync_status, to_char(r.due_date,'YYYY-MM-DD') sync_due_date, r.title sync_title, r.assignee_name sync_assignee_name, r.source_updated_at sync_updated_at, r.removed_at sync_removed_at`;
@@ -101,7 +101,10 @@ export function taskView(a: any) {
 function assignmentDto(a: any) {
   return {
     id: a.id, title: a.title, brief: a.brief, due_date: a.due_date, sort_order: a.sort_order,
-    brand: { id: a.tracker_brand_id, name: a.tracker_brand_name }, assignee: { id: a.tracker_assignee_id, name: a.tracker_assignee_name },
+    // send: false = the item stays in the Marketing Dashboard (never sent to Task Tracker); brand/assignee/due are optional then.
+    send: a.send_to_tracker !== false,
+    brand: a.tracker_brand_id ? { id: a.tracker_brand_id, name: a.tracker_brand_name } : null,
+    assignee: a.tracker_assignee_id ? { id: a.tracker_assignee_id, name: a.tracker_assignee_name } : null,
     delivery: { status: a.delivery_status, error: a.delivery_error, last_attempt_at: a.last_attempt_at },
     task: taskView(a),
   };
@@ -118,12 +121,14 @@ function planDto(p: any, assignments: any[], full: boolean) {
     version: p.version, updated_at: p.updated_at,
     assignments: assignments.map(assignmentDto),
     task_count: assignments.filter((a) => a.delivery_status === "created").length,
-    pending_count: assignments.filter((a) => a.delivery_status !== "created").length,
+    pending_count: assignments.filter((a) => a.send_to_tracker !== false && a.delivery_status !== "created").length,
+    local_count: assignments.filter((a) => a.send_to_tracker === false).length,
     unresolved_count: assignments.filter((a) => a.delivery_status === "sending" || a.delivery_status === "unknown").length,
   };
   if (full) return base;
   // Team view (published plans in the window): the plan as published; no delivery internals.
-  return { ...base, assignments: base.assignments.filter((a) => a.task).map(({ delivery, ...a }) => ({ ...a, task: a.task && { ...a.task, version_read: undefined, read_at: undefined } })), pending_count: undefined, unresolved_count: undefined, version: undefined };
+  // Items kept in the dashboard are part of the published plan too; items still waiting to be sent are not shown.
+  return { ...base, assignments: base.assignments.filter((a) => a.task || !a.send).map(({ delivery, ...a }) => ({ ...a, task: a.task && { ...a.task, version_read: undefined, read_at: undefined } })), pending_count: undefined, unresolved_count: undefined, version: undefined };
 }
 
 export type PlanFilters = { year?: number | null; business?: string | null; channel?: string | null; category?: string | null; status?: string | null; q?: string | null; occasion?: { gift?: string; year?: number; sheet?: string[] } | null };
@@ -173,7 +178,8 @@ export async function plansByOccasion(s: Session, years: number[], sheetIds: str
 }
 
 // ------------------------------------------------------------ writing (owner only)
-type AsgInput = { id?: string; title: string; brief?: string | null; tracker_brand_id: string; tracker_assignee_id: string; due_date: string };
+/** send_to_tracker omitted = true (as before). Brand, assignee and due date are required only for an item to send. */
+export type AsgInput = { id?: string; title: string; brief?: string | null; send_to_tracker?: boolean; tracker_brand_id?: string | null; tracker_assignee_id?: string | null; due_date?: string | null };
 export type PlanInput = {
   business_id: string; name: string; gift_occasion_id?: string | null; occurrence_year?: number | null; sheet_occasion_id?: string | null; promotion_id?: string | null;
   prep_start: string; campaign_start: string; campaign_end: string; objective?: string | null; channels?: string[]; categories?: string[]; target_audience?: string | null;
@@ -228,42 +234,77 @@ function checkAssignmentAgainst(dir: Directory, business: string, a: { tracker_b
   return checkAgainstDirectory(dir, business, { brand_id: a.tracker_brand_id, assignee_id: a.tracker_assignee_id });
 }
 
+/**
+ * Names the Task Tracker brand and person chosen for a plan item, checked against Task Tracker's directory when it can
+ * be read (otherwise the names already stored for the same ids are kept). An item to send needs all of brand, assignee
+ * and due date; an item kept in the dashboard needs none, and its assignee (if any) only has to work for the business.
+ */
+export function nameItem(dir: Directory | null, business: string, a: AsgInput, cur?: { tracker_brand_id: string | null; tracker_brand_name: string | null; tracker_assignee_id: string | null; tracker_assignee_name: string | null }) {
+  const send = a.send_to_tracker !== false;
+  const brandId = a.tracker_brand_id || null, personId = a.tracker_assignee_id || null, due = a.due_date || null;
+  if (send) {
+    const miss = [!brandId && "the Task Tracker brand", !personId && "the assignee", !due && "the due date"].filter(Boolean);
+    if (miss.length) throw new HttpError(422, "incomplete", `"${a.title}": to send it to Task Tracker, choose ${miss.join(", ")} (or keep it in the dashboard).`);
+  }
+  let brandName = brandId && cur?.tracker_brand_id === brandId ? cur.tracker_brand_name : null;
+  let personName = personId && cur?.tracker_assignee_id === personId ? cur.tracker_assignee_name : null;
+  if (dir) {
+    if (brandId && personId) {
+      const chk = checkAssignmentAgainst(dir, business, { tracker_brand_id: brandId, tracker_assignee_id: personId });
+      if (!chk.ok) throw new HttpError(422, chk.code, `"${a.title}": ${chk.message}`);
+      brandName = chk.brand.name; personName = chk.person.name;
+    } else if (brandId) {
+      const b = dir.brands.find((x) => x.id === brandId);
+      if (!b || b.business_id !== business) throw new HttpError(422, "invalid_brand", `"${a.title}": that Task Tracker brand is not available for this business.`);
+      brandName = b.name;
+    } else if (personId) {
+      const ids = dir.brands.filter((b) => b.business_id === business).map((b) => b.id);
+      const p = dir.people.find((x) => x.id === personId && x.brand_ids.some((id) => ids.includes(id)));
+      if (!p) throw new HttpError(422, "invalid_assignee", `"${a.title}": that person does not work on this business in Task Tracker.`);
+      personName = p.name;
+    }
+  }
+  if ((brandId && !brandName) || (personId && !personName))
+    throw new HttpError(503, "tracker_unavailable", send ? "Task Tracker could not be reached to check the brand and assignee. Try again."
+      : "Task Tracker's people list could not be read to name the assignee. Try again, or leave the assignee empty for now.");
+  return { send, brandId, brandName, personId, personName, due };
+}
+
 async function writeAssignments(c: pg.PoolClient, planId: string, business: string, list: AsgInput[], dir: Directory | null) {
-  const existing = (await c.query("select id, delivery_status, title, brief, tracker_brand_id, tracker_assignee_id, to_char(due_date,'YYYY-MM-DD') due_date, tracker_brand_name, tracker_assignee_name from plan_assignments where plan_id = $1", [planId])).rows;
+  const existing = (await c.query(`select id, delivery_status, title, brief, send_to_tracker, tracker_brand_id, tracker_assignee_id, to_char(due_date,'YYYY-MM-DD') due_date, tracker_brand_name, tracker_assignee_name
+                                     from plan_assignments where plan_id = $1`, [planId])).rows;
   const byId = new Map(existing.map((a: any) => [a.id, a]));
   const keep = new Set<string>();
+  const differs = (cur: any, a: AsgInput) => cur.title !== a.title || (cur.brief ?? "") !== (a.brief ?? "") || cur.send_to_tracker !== (a.send_to_tracker !== false)
+    || cur.tracker_brand_id !== (a.tracker_brand_id || null) || cur.tracker_assignee_id !== (a.tracker_assignee_id || null) || cur.due_date !== (a.due_date || null);
   for (const [i, a] of list.entries()) {
     const cur = a.id ? byId.get(a.id) : undefined;
     if (a.id && !cur) throw badRequest("An assignment does not belong to this plan.");
     if (cur && (cur.delivery_status === "sending" || cur.delivery_status === "unknown")) {
       // The task may already exist in Task Tracker under this id: nothing about it may change until that is settled.
-      if (cur.title !== a.title || (cur.brief ?? "") !== (a.brief ?? "") || cur.tracker_brand_id !== a.tracker_brand_id || cur.tracker_assignee_id !== a.tracker_assignee_id || cur.due_date !== a.due_date)
+      if (differs(cur, a))
         throw new HttpError(409, "delivery_unresolved", `"${cur.title}" is being sent to Task Tracker, or its last send got no answer. Use Retry or Check Task Tracker before changing it.`);
       await c.query("update plan_assignments set sort_order = $2 where id = $1", [cur.id, i]);
       keep.add(cur.id); continue;
     }
     if (cur?.delivery_status === "created") {
       // Task Tracker owns a created task: its title, brief, brand and assignee change there. The deadline has its own action.
-      if (cur.title !== a.title || (cur.brief ?? "") !== (a.brief ?? "") || cur.tracker_brand_id !== a.tracker_brand_id || cur.tracker_assignee_id !== a.tracker_assignee_id || cur.due_date !== a.due_date)
+      if (differs(cur, a))
         throw new HttpError(409, "task_owned_by_tracker", `"${cur.title}" is already a Task Tracker task. Change it in Task Tracker (or use "Update deadline").`);
       await c.query("update plan_assignments set sort_order = $2 where id = $1", [cur.id, i]);
       keep.add(cur.id); continue;
     }
-    let brandName = cur?.tracker_brand_id === a.tracker_brand_id ? cur?.tracker_brand_name : null;
-    let personName = cur?.tracker_assignee_id === a.tracker_assignee_id ? cur?.tracker_assignee_name : null;
-    if (dir) {
-      const chk = checkAssignmentAgainst(dir, business, a);
-      if (!chk.ok) throw new HttpError(422, chk.code, `"${a.title}": ${chk.message}`);
-      brandName = chk.brand.name; personName = chk.person.name;
-    }
-    if (!brandName || !personName) throw new HttpError(503, "tracker_unavailable", "Task Tracker could not be reached to check the brand and assignee. Try again.");
+    const n = nameItem(dir, business, a, cur);
+    // An item switched to "keep in the dashboard" forgets an earlier refused send.
+    const vals = [i, a.title, a.brief || null, n.send, n.brandId, n.brandName, n.personId, n.personName, n.due];
     if (cur) {
-      await c.query(`update plan_assignments set sort_order = $2, title = $3, brief = $4, tracker_brand_id = $5, tracker_brand_name = $6, tracker_assignee_id = $7, tracker_assignee_name = $8, due_date = $9 where id = $1`,
-        [cur.id, i, a.title, a.brief || null, a.tracker_brand_id, brandName, a.tracker_assignee_id, personName, a.due_date]);
+      await c.query(`update plan_assignments set sort_order = $2, title = $3, brief = $4, send_to_tracker = $5, tracker_brand_id = $6, tracker_brand_name = $7, tracker_assignee_id = $8,
+                       tracker_assignee_name = $9, due_date = $10, delivery_status = case when $5 then delivery_status else 'not_sent' end,
+                       delivery_error = case when $5 then delivery_error else null end where id = $1`, [cur.id, ...vals]);
       keep.add(cur.id);
     } else {
-      const r = await c.query(`insert into plan_assignments (plan_id, sort_order, title, brief, tracker_brand_id, tracker_brand_name, tracker_assignee_id, tracker_assignee_name, due_date)
-                               values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id`, [planId, i, a.title, a.brief || null, a.tracker_brand_id, brandName, a.tracker_assignee_id, personName, a.due_date]);
+      const r = await c.query(`insert into plan_assignments (plan_id, sort_order, title, brief, send_to_tracker, tracker_brand_id, tracker_brand_name, tracker_assignee_id, tracker_assignee_name, due_date)
+                               values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning id`, [planId, ...vals]);
       keep.add(r.rows[0].id);
     }
   }
@@ -365,11 +406,14 @@ async function planRow(id: string, c?: pg.PoolClient) {
 export async function previewSend(s: Session, id: string) {
   assertOwner(s);
   const p = await planRow(id);
-  const asg = (await assignmentsOf([id])).filter((a) => a.delivery_status !== "created");
+  const all = await assignmentsOf([id]);
+  const asg = all.filter((a) => a.send_to_tracker !== false && a.delivery_status !== "created");
   const dir = await directoryOrNull();
   return {
     plan: { id: p.id, name: p.name, status: p.status, version: p.version },
     tracker_connected: planningTrackerConfigured(), directory_checked: !!dir,
+    // Items kept in the dashboard: published with the plan, never sent.
+    kept: all.filter((a) => a.send_to_tracker === false).map((a) => ({ assignment_id: a.id, title: a.title })),
     items: asg.map((a) => {
       const chk = dir ? checkAssignmentAgainst(dir, p.business_id, a) : null;
       return { assignment_id: a.id, title: a.title, brief: briefFor(p, a), brand: chk?.ok ? chk.brand.name : a.tracker_brand_name, assignee: chk?.ok ? chk.person.name : a.tracker_assignee_name,
@@ -406,10 +450,10 @@ async function claimForSend(planId: string, assignmentId: string) {
   return tx(async (c) => {
     const p = (await c.query(`select ${PLAN_COLS} from ${PLAN_FROM} where p.id = $1 for update of p`, [planId])).rows[0];
     if (!p) return null;
-    const a = (await c.query(`select id, title, brief, tracker_brand_id, tracker_assignee_id, to_char(due_date,'YYYY-MM-DD') due_date, delivery_status,
+    const a = (await c.query(`select id, title, brief, send_to_tracker, tracker_brand_id, tracker_assignee_id, to_char(due_date,'YYYY-MM-DD') due_date, delivery_status,
                                      highest_sent_at, fenced_through
                                 from plan_assignments where id = $1 and plan_id = $2 for update`, [assignmentId, planId])).rows[0];
-    if (!a || a.delivery_status === "created") return null;
+    if (!a || a.delivery_status === "created" || !a.send_to_tracker) return null;   // kept in the dashboard: never sent
     await c.query("update plan_assignments set delivery_status = 'sending', delivery_error = null, last_attempt_at = now() where id = $1", [a.id]);
     const iso = (v: any) => (v ? new Date(v).toISOString() : null);
     return { plan: p, a, previous: a.delivery_status as string, highestSentAt: iso(a.highest_sent_at), fencedThrough: iso(a.fenced_through) };
@@ -430,7 +474,7 @@ export async function sendPending(planId: string) {
   const results: any[] = [];
   try {
     // Holding the lock, any "sending" row is left over from an interrupted send: it is unresolved like "unknown".
-    const pending = (await assignmentsOf([planId])).filter((a) => a.delivery_status !== "created");
+    const pending = (await assignmentsOf([planId])).filter((a) => a.send_to_tracker !== false && a.delivery_status !== "created");
     if (!pending.length) return results;
     if (!planningTrackerConfigured()) {
       for (const a of pending) if (a.delivery_status === "not_sent" || a.delivery_status === "failed") await setDelivery(a.id, "failed", "Task Tracker is not connected for planning.");

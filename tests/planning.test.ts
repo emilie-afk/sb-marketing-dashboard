@@ -631,3 +631,88 @@ describe("a delayed original can't create a task after absence was confirmed, ac
     } finally { people[THAO].brands = [SB_BRAND]; }
   });
 });
+
+describe("items kept in the Marketing Dashboard (send to Task Tracker is optional)", () => {
+  it("an item not marked to send needs only a title, is published with the plan and is never sent", async () => {
+    const c = await owner("POST", "/planning/plans", plan("Dashboard-only items", "2026-12-01", "2026-12-15", "2026-12-20", { assignments: [
+      { title: "Collect product photos", send_to_tracker: false },
+      { title: "Note who writes the copy", send_to_tracker: false, tracker_assignee_id: THAO, due_date: "2026-12-05" },
+      { title: "Email concept", tracker_brand_id: SB_BRAND, tracker_assignee_id: THAO, due_date: "2026-12-06" }] }));
+    expect(c.status).toBe(200);
+    const p = c.body.plan;
+    expect(p.assignments.map((a: any) => [a.title, a.send, a.assignee?.name ?? null, a.brand?.name ?? null])).toEqual([
+      ["Collect product photos", false, null, null], ["Note who writes the copy", false, "Thao", null], ["Email concept", true, "Thao", "Succulents Box"]]);
+    expect(p).toMatchObject({ pending_count: 1, local_count: 2 });
+    // An item to send still needs brand, assignee and due date (omitting the flag means send, as before).
+    const bad = await owner("PATCH", `/planning/plans/${p.id}`, { ...plan("Dashboard-only items", "2026-12-01", "2026-12-15", "2026-12-20"), version: p.version,
+      assignments: [...p.assignments.map((a: any) => ({ id: a.id, title: a.title, send_to_tracker: a.send, tracker_brand_id: a.brand?.id ?? null, tracker_assignee_id: a.assignee?.id ?? null, due_date: a.due_date })),
+        { title: "Missing details" }] });
+    expect(bad.status).toBe(422);
+    expect(bad.body.error.code).toBe("incomplete");
+    // Someone who doesn't work on the business can't be noted on a dashboard-only item either.
+    expect((await owner("PATCH", `/planning/plans/${p.id}`, { ...plan("Dashboard-only items", "2026-12-01", "2026-12-15", "2026-12-20"), version: p.version,
+      assignments: [{ title: "Wrong person", send_to_tracker: false, tracker_assignee_id: OMAR }] })).body.error.code).toBe("invalid_assignee");
+
+    const pre = (await owner("POST", `/planning/plans/${p.id}/preview`)).body;
+    expect(pre.items.map((i: any) => i.title)).toEqual(["Email concept"]);
+    expect(pre.kept.map((i: any) => i.title)).toEqual(["Collect product photos", "Note who writes the copy"]);
+    const before = tracker.creates;
+    const r = await owner("POST", `/planning/plans/${p.id}/publish`, { version: p.version });
+    expect(r.body.results.map((x: any) => x.outcome)).toEqual(["created"]);
+    expect(tracker.creates).toBe(before + 1);
+    // Sending again sends nothing more; the team sees the task and the dashboard-only items, without delivery details.
+    expect((await owner("POST", `/planning/plans/${p.id}/publish`, { version: r.body.plan.version })).body.results).toEqual([]);
+    const team = (await admin("GET", `/planning/plans/${p.id}`)).body.plan;
+    expect(team.assignments.map((a: any) => [a.title, a.send])).toEqual([["Collect product photos", false], ["Note who writes the copy", false], ["Email concept", true]]);
+    expect(JSON.stringify(team)).not.toContain("delivery");
+
+    // A dashboard-only item can be switched to send later (then sent with "Send remaining tasks"); a created task can't be switched off.
+    const cur = r.body.plan;
+    const rows = cur.assignments.map((a: any) => ({ id: a.id, title: a.title, send_to_tracker: a.send, tracker_brand_id: a.brand?.id ?? null, tracker_assignee_id: a.assignee?.id ?? null, due_date: a.due_date }));
+    const off = await owner("PATCH", `/planning/plans/${p.id}`, { ...plan("Dashboard-only items", "2026-12-01", "2026-12-15", "2026-12-20"), version: cur.version,
+      assignments: rows.map((a: any) => a.title === "Email concept" ? { ...a, send_to_tracker: false } : a) });
+    expect(off.body.error.code).toBe("task_owned_by_tracker");
+    const on = await owner("PATCH", `/planning/plans/${p.id}`, { ...plan("Dashboard-only items", "2026-12-01", "2026-12-15", "2026-12-20"), version: cur.version,
+      assignments: rows.map((a: any) => a.title === "Note who writes the copy" ? { ...a, send_to_tracker: true, tracker_brand_id: SB_BRAND } : a) });
+    expect(on.status).toBe(200);
+    const after = (await owner("GET", `/planning/plans/${p.id}`)).body.plan;
+    expect(after).toMatchObject({ pending_count: 1, local_count: 1 });
+    expect((await owner("POST", `/planning/plans/${p.id}/publish`, { version: after.version })).body.results.map((x: any) => x.outcome)).toEqual(["created"]);
+    expect(tracker.creates).toBe(before + 2);
+  });
+
+  it("the database refuses an item to send without its Task Tracker details, and a dashboard-only item that was sent", async () => {
+    const p = (await owner("POST", "/planning/plans", plan("Constraint check", "2026-12-01", "2026-12-15", "2026-12-20"))).body.plan;
+    await expect(q("insert into plan_assignments (plan_id, title) values ($1, 'x')", [p.id])).rejects.toThrow(/send_ready/);
+    await expect(q("insert into plan_assignments (plan_id, title, send_to_tracker, delivery_status) values ($1, 'x', false, 'failed')", [p.id])).rejects.toThrow(/local_not_sent/);
+    await expect(q("insert into plan_assignments (plan_id, title, send_to_tracker, tracker_assignee_id) values ($1, 'x', false, gen_random_uuid())", [p.id])).rejects.toThrow(/assignee_named/);
+  });
+});
+
+describe("rollback of 017 (items kept in the dashboard)", () => {
+  it("no build can mark a dashboard-only item as sending; the rollback removes those items and keeps the others", async () => {
+    const { readFileSync } = await import("node:fs");
+    const c = await owner("POST", "/planning/plans", plan("Rollback check", "2026-12-01", "2026-12-15", "2026-12-20", { assignments: [
+      { title: "Kept in the dashboard", send_to_tracker: false },
+      { title: "To send", tracker_brand_id: SB_BRAND, tracker_assignee_id: THAO, due_date: "2026-12-06" }] }));
+    const [local, toSend] = c.body.plan.assignments;
+    // What the previous build does before calling Task Tracker (and when Task Tracker is not connected) is refused for
+    // the dashboard-only item, so even a previous build deployed too early cannot send it.
+    await expect(q("update plan_assignments set delivery_status = 'sending', delivery_error = null, last_attempt_at = now() where id = $1", [local.id])).rejects.toThrow(/local_not_sent/);
+    await expect(q("update plan_assignments set delivery_status = 'failed' where id = $1", [local.id])).rejects.toThrow(/local_not_sent/);
+    await q("update plan_assignments set delivery_status = 'sending' where id = $1", [toSend.id]);
+    await q("update plan_assignments set delivery_status = 'not_sent' where id = $1", [toSend.id]);
+
+    // The rollback (run first, while this build is live) removes only the dashboard-only items; re-applying 017 restores the schema.
+    await q(readFileSync("db/rollback/017_plan_items_optional_send.down.sql", "utf8"));
+    try {
+      expect((await q("select title from plan_assignments where plan_id = $1 order by sort_order", [c.body.plan.id])).map((r: any) => r.title)).toEqual(["To send"]);
+      expect(await q("select 1 from information_schema.columns where table_name = 'plan_assignments' and column_name = 'send_to_tracker'")).toEqual([]);
+      expect(await q("select 1 from schema_migrations where name = '017_plan_items_optional_send.sql'")).toEqual([]);
+    } finally {
+      await q(readFileSync("db/migrations/017_plan_items_optional_send.sql", "utf8"));
+      await q("insert into schema_migrations (name) values ('017_plan_items_optional_send.sql')");
+    }
+    expect((await owner("GET", `/planning/plans/${c.body.plan.id}`)).body.plan.assignments.map((a: any) => [a.title, a.send])).toEqual([["To send", true]]);
+  });
+});

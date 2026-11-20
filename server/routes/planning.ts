@@ -17,7 +17,10 @@ const txt = (max: number) => z.string().max(max).refine((v) => !/[\u0000-\u0008\
 const line = (max: number) => z.string().trim().min(1).max(max).refine((v) => !/[\u0000-\u001f\u007f]/.test(v), "control characters");
 
 const assignment = z.object({
-  id: uuid.optional(), title: line(300), brief: txt(1500), tracker_brand_id: uuid, tracker_assignee_id: uuid, due_date: date,
+  id: uuid.optional(), title: line(300), brief: txt(1500),
+  // false = keep the item in the Marketing Dashboard (never sent to Task Tracker). Omitted = send, as before.
+  send_to_tracker: z.boolean().optional(),
+  tracker_brand_id: uuid.nullable().optional(), tracker_assignee_id: uuid.nullable().optional(), due_date: date.nullable().optional(),
 }).strict();
 const planSchema = z.object({
   business_id: z.enum(PLAN_BUSINESSES), name: line(200),
