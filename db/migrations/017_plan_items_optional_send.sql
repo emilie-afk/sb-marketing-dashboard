@@ -3,7 +3,8 @@
 -- are optional and are kept for the plan only. An item to send still needs the Task Tracker brand, assignee and due
 -- date, checked as before. Publishing a plan sends only the items marked to send.
 -- Existing items keep send_to_tracker = true, so they behave exactly as before.
--- Rollback: db/rollback/017_plan_items_optional_send.down.sql (removes items that were never meant to be sent).
+-- Rollback: run db/rollback/017_plan_items_optional_send.down.sql FIRST, then deploy the previous build (see that file).
+-- plan_assignments_local_not_sent also stops any build from marking a dashboard-only item "sending" (sent).
 alter table plan_assignments add column send_to_tracker boolean not null default true;
 alter table plan_assignments alter column tracker_brand_id drop not null;
 alter table plan_assignments alter column tracker_brand_name drop not null;

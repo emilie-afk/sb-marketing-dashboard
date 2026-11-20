@@ -454,6 +454,32 @@ describe("bulk actions", () => {
       ["Bulk plan item one", false, "Thao", "2026-12-05"], ["Bulk plan item two", false, null, null]]);
     expect(tracker.creates).toBe(0);
   });
+
+  it("re-checks the plan for every item: a plan published or moved to another business mid-batch gets no more items", async () => {
+    // A trigger stands in for another window acting between two items: right after the first item is inserted, the
+    // plan is published (then, in the second run, moved to another business). The next items must be refused.
+    const run = async (name: string, change: string) => {
+      const draft = (await owner("POST", "/planning/plans", planBody(name))).body.plan;
+      const [a, b, c] = await make([`${name} one`, `${name} two`, `${name} three`]);
+      await q(`create or replace function test_mid_batch() returns trigger language plpgsql as $$ begin ${change} return new; end $$`);
+      await q("create trigger test_mid_batch after insert on plan_assignments for each row execute function test_mid_batch()");
+      try {
+        return { draft, ids: [a.id, b.id, c.id], r: await owner("POST", "/review/suggestions/bulk-add-to-plan", { business_id: "sb", plan_id: draft.id, items: await refs([a.id, b.id, c.id]) }) };
+      } finally { await q("drop trigger test_mid_batch on plan_assignments"); await q("drop function test_mid_batch()"); }
+    };
+    const pub = await run("Mid-batch publish", "update marketing_plans set status = 'published', published_at = now() where id = new.plan_id;");
+    expect(pub.r.status).toBe(200);
+    expect(pub.r.body.results.map((x: any) => x.ok)).toEqual([true, false, false]);
+    expect(pub.r.body.results[1].message).toMatch(/draft plan/);
+    expect((await q("select count(*)::int n from plan_assignments where plan_id = $1", [pub.draft.id]))[0].n).toBe(1);
+    expect(pub.r.body.items.map((x: any) => x.status)).toEqual(["planned", "pending", "pending"]);
+
+    const moved = await run("Mid-batch business change", "update marketing_plans set business_id = 'perksradar' where id = new.plan_id;");
+    expect(moved.r.body.results.map((x: any) => x.ok)).toEqual([true, false, false]);
+    expect(moved.r.body.results[1].message).toMatch(/another business/);
+    expect((await q("select count(*)::int n from plan_assignments where plan_id = $1", [moved.draft.id]))[0].n).toBe(1);
+    expect(tracker.creates).toBe(0);
+  });
 });
 
 // ====================================================================== occasions, timeline and in-place actions

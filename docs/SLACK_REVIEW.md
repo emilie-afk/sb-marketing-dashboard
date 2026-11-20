@@ -158,8 +158,11 @@ accepted yet; the scanner then starts from its configured start point.
   dismissed, tagged `resolved_before_rollback`; links are dropped).
 - Migration `db/migrations/017_plan_items_optional_send.sql` (plan items kept in the dashboard: `send_to_tracker`, and
   brand, assignee and due date optional for those items; existing items keep sending); rollback
-  `db/rollback/017_plan_items_optional_send.down.sql` (deploy the previous build first; it removes items kept in the
-  dashboard, whose suggestions then show "Removed from its plan" and can be returned to review).
+  `db/rollback/017_plan_items_optional_send.down.sql`. Run the rollback **before** deploying the previous build: the
+  previous build sends every plan item, so it must never see an item kept in the dashboard. The rollback locks the
+  table, removes those items (their suggestions show "Removed from its plan" and can be returned to review) and
+  restores the old columns; until the previous build is live, the current build's plan pages and sends fail, so nothing
+  is sent in between. While 017 is in place, a database check also refuses to mark a dashboard-only item as sending.
 - Requires Task Tracker migration `004_task_origin.sql` and the matching deploy (accepts `origin: "review"`) before the
   first task is created.
 - Scanner instructions: [SLACK_REVIEW_SCANNER.md](SLACK_REVIEW_SCANNER.md). The scanner stays unscheduled until the queue

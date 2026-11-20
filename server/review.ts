@@ -484,15 +484,22 @@ export async function planChoices(s: Session, id?: string) {
   return { business: r?.business_id ?? r?.suggested_business ?? null, occasion: linked ? { ...linked, name: r.occasion_name } : null, plans };
 }
 
+/**
+ * Locks the plan row (the lock plan edits, deletes and publishing take) and checks it is still a draft of the business.
+ * Called in the same transaction as every insert into it, so a plan published, moved to another business or deleted
+ * in another window, even halfway through a bulk add, never receives an item.
+ */
+async function lockDraftPlan(c: pg.PoolClient, planId: string, business: string) {
+  const plan = (await c.query("select id, business_id, status from marketing_plans where id = $1 for update", [planId])).rows[0];
+  if (!plan) throw notFound("Plan");
+  if (plan.status !== "draft") throw new HttpError(409, "plan_published", "Choose a draft plan. A published plan is visible to the team.");
+  if (plan.business_id !== business) throw new HttpError(409, "plan_business_changed", "That plan belongs to another business.");
+  return plan.id as string;
+}
+
 /** The draft plan the items go into: an existing draft of the business, or a new one made here (private, like any draft). */
 async function planTarget(c: pg.PoolClient, s: Session, v: { plan_id?: string; new_plan?: z.infer<typeof newPlanSchema>; business_id: string }) {
-  if (v.plan_id) {
-    const plan = (await c.query("select id, business_id, status from marketing_plans where id = $1 for update", [v.plan_id])).rows[0];
-    if (!plan) throw notFound("Plan");
-    if (plan.status !== "draft") throw new HttpError(409, "plan_published", "Choose a draft plan. A published plan is visible to the team.");
-    if (plan.business_id !== v.business_id) throw badRequest("That plan belongs to another business.");
-    return plan.id as string;
-  }
+  if (v.plan_id) return lockDraftPlan(c, v.plan_id, v.business_id);
   const np = v.new_plan!;
   if (np.occasion) {
     const o = (await c.query("select kind, (select array_agg(business_id) from gift_occasion_brands b where b.occasion_id = o.id) brands from gift_occasions o where id = $1 and active", [np.occasion.id])).rows[0];
@@ -561,7 +568,7 @@ export async function bulkAddToPlan(s: Session, v: z.infer<typeof bulkAddSchema>
         const cur = await row(it.id, c, true);
         if (!cur) throw notFound("Suggestion");
         if (cur.version !== it.version) throw new HttpError(409, "conflict", "Changed in another window. Reload first.");
-        await c.query("select 1 from marketing_plans where id = $1 for update", [planId]);
+        await lockDraftPlan(c, planId, v.business_id);   // re-checked for every item, under the lock
         const same = cur.business_id === v.business_id;
         await addOne(c, cur, planId, v.business_id, { title: cur.title, brief: cur.brief, send_to_tracker: false,
           tracker_brand_id: same ? cur.tracker_brand_id : null, tracker_assignee_id: same ? cur.tracker_assignee_id : null, due_date: cur.due_date_s ?? null }, dir);

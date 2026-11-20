@@ -688,3 +688,31 @@ describe("items kept in the Marketing Dashboard (send to Task Tracker is optiona
     await expect(q("insert into plan_assignments (plan_id, title, send_to_tracker, tracker_assignee_id) values ($1, 'x', false, gen_random_uuid())", [p.id])).rejects.toThrow(/assignee_named/);
   });
 });
+
+describe("rollback of 017 (items kept in the dashboard)", () => {
+  it("no build can mark a dashboard-only item as sending; the rollback removes those items and keeps the others", async () => {
+    const { readFileSync } = await import("node:fs");
+    const c = await owner("POST", "/planning/plans", plan("Rollback check", "2026-12-01", "2026-12-15", "2026-12-20", { assignments: [
+      { title: "Kept in the dashboard", send_to_tracker: false },
+      { title: "To send", tracker_brand_id: SB_BRAND, tracker_assignee_id: THAO, due_date: "2026-12-06" }] }));
+    const [local, toSend] = c.body.plan.assignments;
+    // What the previous build does before calling Task Tracker (and when Task Tracker is not connected) is refused for
+    // the dashboard-only item, so even a previous build deployed too early cannot send it.
+    await expect(q("update plan_assignments set delivery_status = 'sending', delivery_error = null, last_attempt_at = now() where id = $1", [local.id])).rejects.toThrow(/local_not_sent/);
+    await expect(q("update plan_assignments set delivery_status = 'failed' where id = $1", [local.id])).rejects.toThrow(/local_not_sent/);
+    await q("update plan_assignments set delivery_status = 'sending' where id = $1", [toSend.id]);
+    await q("update plan_assignments set delivery_status = 'not_sent' where id = $1", [toSend.id]);
+
+    // The rollback (run first, while this build is live) removes only the dashboard-only items; re-applying 017 restores the schema.
+    await q(readFileSync("db/rollback/017_plan_items_optional_send.down.sql", "utf8"));
+    try {
+      expect((await q("select title from plan_assignments where plan_id = $1 order by sort_order", [c.body.plan.id])).map((r: any) => r.title)).toEqual(["To send"]);
+      expect(await q("select 1 from information_schema.columns where table_name = 'plan_assignments' and column_name = 'send_to_tracker'")).toEqual([]);
+      expect(await q("select 1 from schema_migrations where name = '017_plan_items_optional_send.sql'")).toEqual([]);
+    } finally {
+      await q(readFileSync("db/migrations/017_plan_items_optional_send.sql", "utf8"));
+      await q("insert into schema_migrations (name) values ('017_plan_items_optional_send.sql')");
+    }
+    expect((await owner("GET", `/planning/plans/${c.body.plan.id}`)).body.plan.assignments.map((a: any) => [a.title, a.send])).toEqual([["To send", true]]);
+  });
+});
