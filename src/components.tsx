@@ -7,6 +7,7 @@ export function MetricTile({ m }: { m: any }) {
   const cov = m.coverage;
   const tz = m.timezone ? ` (${tzShort(m.timezone)})` : "";
   const reason = m.value.state !== "missing" ? ""
+    : m.latest?.earlier ? "no figure has been received for these dates yet."
     : m.latest?.granularity === "week" ? "this source reports by week, and a week is never split into days."
     : (m.value.note || (cov?.status === "unsupported" ? cov.reason : ""));
   return (
@@ -18,7 +19,8 @@ export function MetricTile({ m }: { m: any }) {
       {m.latest && (
         <div className="latest">
           Latest reported: <b>{fmt(m.latest.value, m.unit)}</b> for <b>{range(m.latest.period)}</b>{m.latest.granularity === "week" ? " (week)" : ""}.
-          {m.latest.outside?.length ? <> Not counted in this period: it includes {m.latest.outside.map((o: any) => range(o)).join(" and ")}.</> : null}
+          {m.latest.earlier ? <> Not counted in this period: it is before the selected dates.</>
+            : m.latest.outside?.length ? <> Not counted in this period: it includes {m.latest.outside.map((o: any) => range(o)).join(" and ")}.</> : null}
         </div>
       )}
       {m.value.state !== "value" && m.value.note && m.value.state !== "missing" && m.value.note !== cov?.note && <div className="sub">{m.value.note}</div>}
