@@ -83,23 +83,35 @@ export async function sourceStatus() {
 
 /**
  * Figures expected for every finished Saturday–Friday week (due from the Tuesday after it). A sync that ran fine but
- * brought no figure for the week is not "up to date": each expected figure counts as received when any source has it
- * for the whole week (a week total, or all 7 days).
+ * brought no figure for the week is not "up to date". A figure counts as received only when BOTH hold:
+ * - the dashboard itself gives a clean figure for exactly that week (a value, not missing, not partial or incomplete,
+ *   and not a conflict between sources), using the same rules as the cards; and
+ * - one source has the whole week: a complete week figure, or complete figures for all 7 days from that one source.
+ *   Days pieced together from different sources, missing or incomplete figures never clear the warning.
  */
-const WEEKLY_EXPECTED: { business: string; metrics: string[]; label: string }[] = [
-  { business: "sb", metrics: ["ad_spend"], label: "Succulents Box advertising spend" },
-  { business: "sb", metrics: ["sessions", "conversion_rate"], label: "Succulents Box sessions / conversion rate" },
-  { business: "p2s", metrics: ["ad_spend"], label: "P2S advertising spend" },
+const WEEKLY_EXPECTED: { business: string; metric: string; inputs: string[]; label: string }[] = [
+  { business: "sb", metric: "ad_spend", inputs: ["ad_spend"], label: "Succulents Box advertising spend" },
+  { business: "sb", metric: "conversion_rate", inputs: ["conversion_rate", "sessions_converted"], label: "Succulents Box conversion rate" },
+  { business: "p2s", metric: "ad_spend", inputs: ["ad_spend"], label: "P2S advertising spend" },
 ];
 export async function missingWeeklyFigures(today: string) {
   const week = dueReportWeek(today);
-  const have = await query<{ business_id: string; metric_key: string }>(
+  const whole = await query<{ business_id: string; metric_key: string }>(
     `select business_id, metric_key from observations
       where status = 'active' and scope_key = 'all' and metric_key = any($1) and period_start >= $2 and period_end <= $3
-      group by business_id, metric_key
-     having bool_or(granularity = 'week' and period_start = $2 and period_end = $3) or count(distinct period_start) filter (where granularity = 'day') = 7`,
-    [[...new Set(WEEKLY_EXPECTED.flatMap((e) => e.metrics))], week.start, week.end]);
-  const missing = WEEKLY_EXPECTED.filter((e) => !have.some((h) => h.business_id === e.business && e.metrics.includes(h.metric_key))).map((e) => e.label);
+        and value_state = 'value' and value is not null and completeness = 'complete'
+      group by business_id, metric_key, source_id
+     having bool_or(granularity = 'week' and period_start = $2 and period_end = $3)
+         or count(distinct period_start) filter (where granularity = 'day') = 7`,
+    [[...new Set(WEEKLY_EXPECTED.flatMap((e) => e.inputs))], week.start, week.end]);
+  const missing: string[] = [];
+  for (const e of WEEKLY_EXPECTED) {
+    const sourced = whole.some((h) => h.business_id === e.business && e.inputs.includes(h.metric_key));
+    const r = sourced ? await metricValue(e.business, e.metric, "all", week) : null;
+    const clean = !!r && r.value.state === "value" && r.value.value !== null && r.value.flag !== "partial"
+      && r.coverage.status === "supported" && !r.coverage.partial;
+    if (!clean) missing.push(e.label);
+  }
   return { week: { ...week, label: formatRange(week) }, missing };
 }
 

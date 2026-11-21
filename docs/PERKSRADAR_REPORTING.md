@@ -36,6 +36,10 @@ x-reporting-secret: <PERKSRADAR_REPORTING_SECRET>
 | `reminders_sent` | reminder emails sent that day |
 | `emails_delivered`, `emails_opened`, `emails_clicked` | email events that day, from the email provider |
 
+Send every day of the range, once. The dashboard stores a month only when all its days are present, finished,
+readable and sent once (the running month: the 1st to yesterday). A month with a gap keeps what was stored before and
+the gap shows in the pull's result; a day with no readable date stops the whole read.
+
 Each count is a whole number ≥ 0, or `null` when it is not known (for example the email provider was unreachable).
 `null` is shown as missing, never as zero. Unknown fields are refused, so add new counts only with a schema change.
 

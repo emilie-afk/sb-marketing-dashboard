@@ -107,16 +107,67 @@ describe("weekly figures in the dashboard", () => {
   it("the status names the week whose figures are due but not received", async () => {
     // Nov 2-8, 2030 is due from Tuesday Nov 12.
     expect(dueReportWeek("2030-11-12")).toEqual(wk);
-    expect((await missingWeeklyFigures("2030-11-12")).missing).toEqual([]);   // sb ad spend + sessions, p2s ad spend: all there
+    // SB ad spend and conversion are there; P2S ad spend is a conflict between two same-rank sources (test above), so it
+    // is shown as missing on the card and is NOT received.
+    expect((await missingWeeklyFigures("2030-11-12")).missing).toEqual(["P2S advertising spend"]);
     const r = await missingWeeklyFigures("2030-11-19");                     // Nov 9-15: nothing yet
     expect(r.week).toMatchObject({ start: "2030-11-09", end: "2030-11-15" });
-    expect(r.missing).toEqual(["Succulents Box advertising spend", "Succulents Box sessions / conversion rate", "P2S advertising spend"]);
+    expect(r.missing).toEqual(["Succulents Box advertising spend", "Succulents Box conversion rate", "P2S advertising spend"]);
     // A scorecard conversion rate alone counts as received for the conversion figure.
     await eosWeek("sb", "2030-11-09", "2030-11-15", [{ metric: "conversion_rate", value: 0.0077 }]);
     expect((await missingWeeklyFigures("2030-11-19")).missing).toEqual(["Succulents Box advertising spend", "P2S advertising spend"]);
     const status = (await call("viewer", "GET", "/status")).body;
     expect(status.weekly).toHaveProperty("week");
     expect(Array.isArray(status.weekly.missing)).toBe(true);
+  });
+});
+
+describe("a week counts as received only with a clean, single-source figure", () => {
+  const w = { start: "2030-12-07", end: "2030-12-13" };
+  const today = "2030-12-17";                          // Tuesday after the week
+  let n = 0;
+  const pulled = (business: "sb" | "p2s", sourceId: string, obs: any[], completeness = "complete", period = w, granularity = "week") =>
+    applyPulled({ schema_version: 1, submission_id: `t-${sourceId}-${++n}`, source: sourceId.replace(/\W/g, "_"), business,
+      period: { start: period.start, end: period.end, granularity, timezone: "America/Los_Angeles" }, collected_at: "2030-12-15T08:00:00Z", completeness,
+      records: { observations: obs.map((o) => ({ scope: "all", period_start: period.start, period_end: period.end, granularity, ...o })) } },
+      `t-${sourceId}-${n}`, { sourceId, submitter: `test:${sourceId}`, submissionSource: sourceId.replace(/\W/g, "_") }, "test");
+  const sbAd = async () => (await missingWeeklyFigures(today)).missing.includes("Succulents Box advertising spend");
+
+  beforeAll(async () => { await freshDb(); });
+
+  it("a figure marked missing does not clear the warning", async () => {
+    await pulled("sb", "sheet.eos_scorecard", [{ metric: "ad_spend", value: null, state: "missing" }]);
+    expect(await sbAd()).toBe(true);
+  });
+
+  it("an incomplete or partial week does not clear it", async () => {
+    await pulled("sb", "sheet.eos_scorecard", [{ metric: "ad_spend", value: 500 }], "partial");
+    expect(await sbAd()).toBe(true);
+    await pulled("sb", "sheet.eos_scorecard", [{ metric: "ad_spend", value: 500 }], "incomplete");
+    expect(await sbAd()).toBe(true);
+  });
+
+  it("days pieced together from two sources do not clear it; all 7 days from one source do", async () => {
+    await freshDb();
+    const day = (d: string) => ({ start: d, end: d });
+    const days = ["2030-12-07", "2030-12-08", "2030-12-09", "2030-12-10", "2030-12-11", "2030-12-12", "2030-12-13"];
+    for (const d of days.slice(0, 4)) await pulled("sb", "sheet.daily_analytics", [{ metric: "ad_spend", value: 10 }], "complete", day(d), "day");
+    for (const d of days.slice(4)) await pulled("sb", "manual.upload", [{ metric: "ad_spend", value: 10 }], "complete", day(d), "day");
+    expect(await sbAd()).toBe(true);
+    for (const d of days.slice(4)) await pulled("sb", "sheet.daily_analytics", [{ metric: "ad_spend", value: 10 }], "complete", day(d), "day");
+    expect(await sbAd()).toBe(false);
+  });
+
+  it("two same-rank sources that disagree for the week do not clear it", async () => {
+    await freshDb();
+    await pulled("sb", "manual.upload", [{ metric: "ad_spend", value: 500 }]);
+    await pulled("sb", "submission.api", [{ metric: "ad_spend", value: 520 }]);
+    expect(await sbAd()).toBe(true);
+    // A lower-rank scorecard figure next to one weekly report figure: the report is used, and it is received.
+    await freshDb();
+    await pulled("sb", "submission.api", [{ metric: "ad_spend", value: 520 }]);
+    await pulled("sb", "sheet.eos_scorecard", [{ metric: "ad_spend", value: 500 }]);
+    expect(await sbAd()).toBe(false);
   });
 });
 

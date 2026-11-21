@@ -4,8 +4,9 @@
 //
 // The app returns daily COUNTS only (sign-ups, cards added, reminders sent, emails delivered / opened / clicked),
 // never subscriber emails, card lists or any other personal data. Each pull re-reads the last ~4 months, so a missed
-// or failed pull is repaired by the next one. Only finished days are sent (the app marks today as not complete), and
-// only months wholly inside the window (plus the running month), so a month is never replaced by a partial read.
+// or failed pull is repaired by the next one. A month is sent only when every one of its days is present, finished
+// and readable (the running month: the 1st to yesterday), and only months that start inside the window, so a
+// partial read never replaces a complete month. A month with a gap keeps what was stored and the gap is reported.
 // One submission per calendar month: a month whose counts changed is sent as a correction of the earlier one, an
 // unchanged month writes nothing.
 import { createHash } from "node:crypto";
@@ -57,30 +58,53 @@ export async function pullPerksradar(actor = PR_WHO.submitter, today = todayIn("
   const origin = originOf(process.env.PERKSRADAR_API_URL)!;
   const headers = { "x-reporting-secret": process.env.PERKSRADAR_REPORTING_SECRET! };
   const from = addDays(today, -PR_WINDOW_DAYS), to = addDays(today, -1);
-  const byMonth = new Map<string, Day[]>();
+  const byDate = new Map<string, Day>();
+  const bad = new Set<string>();          // dates sent twice with different counts, or a day that couldn't be read
+  let unreadable = 0;                     // items with no usable date
   const results: any[] = [];
   let timezone = "America/Los_Angeles";
-  const seen = new Set<string>();
   const problems = await walkPages<unknown>("Perksradar", MAX_PAGES, async (cursor) => {
     const page = pageSchema.parse(await getJson(origin, `/v1/reporting/days?from=${from}&to=${to}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, headers, "Perksradar"));
     timezone = page.timezone;
     return { items: page.days, next: page.next_cursor };
   }, async (item) => {
     const parsed = daySchema.safeParse(item);
-    if (!parsed.success) { results.push({ outcome: "rejected", reason: "unexpected day format" }); return; }
+    if (!parsed.success) {
+      // A malformed day: its month can't be trusted. Without a readable date, no month can.
+      const date = (item as any)?.date;
+      if (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)) bad.add(date); else unreadable++;
+      return;
+    }
     const d = parsed.data;
-    // Outside the window asked for, a day sent twice, or a day still running: not used.
-    if (d.date < from || d.date > to || !d.complete || seen.has(d.date)) return;
-    seen.add(d.date);
-    const month = d.date.slice(0, 7);
-    byMonth.set(month, [...(byMonth.get(month) ?? []), d]);
+    if (d.date < from || d.date > to) return;                       // outside the window asked for
+    const prev = byDate.get(d.date);
+    if (prev && JSON.stringify(prev) !== JSON.stringify(d)) bad.add(d.date);
+    byDate.set(d.date, d);
   });
-  // A page that couldn't be read leaves the months unsent: never store a month from a partial read.
+  // A page that couldn't be read, or a day with no readable date: nothing is stored from this read.
   if (problems.length) return { outcome: "incomplete" as const, results, problems };
-  // A month that starts before the window was read only in part: it keeps what was stored when it was whole.
-  for (const [month, days] of [...byMonth.entries()].sort()) {
+  if (unreadable) return { outcome: "incomplete" as const, results, problems: [`Perksradar sent ${unreadable} day(s) in an unexpected format; nothing was stored.`] };
+
+  // A month is sent only when it is whole in this read: every one of its days in the window (all days for a past
+  // month, the 1st to yesterday for the running month) is present, finished, readable and sent once. Otherwise the
+  // month keeps what was stored before (a partial read never replaces a complete month) and the gap is reported.
+  // A month that starts before the window was read only in part, so it is never sent.
+  const months = new Set<string>();
+  for (let d = from; d <= to; d = addDays(d, 1)) months.add(d.slice(0, 7));
+  for (const month of [...months].sort()) {
     if (`${month}-01` < from) continue;
-    results.push({ month, ...(await applyPulled(monthToSubmission(month, days, timezone), `pr:${month}:`, PR_WHO, actor)) });
+    const [y, m] = month.split("-").map(Number);
+    const last = `${month}-${String(daysInMonth(y, m)).padStart(2, "0")}`;
+    const expected: string[] = [];
+    for (let d = `${month}-01`; d <= (last < to ? last : to); d = addDays(d, 1)) expected.push(d);
+    const gaps = expected.filter((d) => !byDate.has(d) || !byDate.get(d)!.complete || bad.has(d));
+    if (gaps.length) {
+      results.push({ month, outcome: "held", reason: `${gaps.length} day(s) missing, unfinished or unreadable (first: ${gaps[0]}); the stored month is kept` });
+      continue;
+    }
+    results.push({ month, ...(await applyPulled(monthToSubmission(month, expected.map((d) => byDate.get(d)!), timezone), `pr:${month}:`, PR_WHO, actor)) });
   }
-  return { outcome: results.some((r) => r.outcome === "rejected" || r.outcome === "failed") ? "incomplete" as const : "done" as const, results, problems };
+  const held = results.filter((r) => r.outcome === "held");
+  if (held.length) problems.push(...held.map((r) => `Perksradar ${r.month}: ${r.reason}.`));
+  return { outcome: results.some((r) => ["rejected", "failed", "held"].includes(r.outcome)) ? "incomplete" as const : "done" as const, results, problems };
 }

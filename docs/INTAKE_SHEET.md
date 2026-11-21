@@ -86,7 +86,9 @@ months; revenue comes from the daily workbook instead). They fill the weeks the 
 ## F. "Weekly figures not received"
 
 From the Tuesday after each Saturday–Friday week, the dashboard checks that the week has Succulents Box ad spend,
-Succulents Box sessions or conversion rate, and P2S ad spend (from any source, as a week total or all seven days).
+Succulents Box conversion rate, and P2S ad spend. A figure counts as received only when the card itself shows a clean
+figure for exactly that week (a value, not missing, partial or incomplete, and no conflict between sources) and one
+source has the whole week (a complete week figure, or complete figures for all seven days from that one source).
 Anything missing is named in the status chip and on the overview, instead of "Sources up to date". A card with no
 figure for the selected dates shows the latest earlier figure (up to about two months back), labelled with its own
 dates and not counted.
