@@ -100,6 +100,11 @@ describe("weekly figures in the dashboard", () => {
     const ad = await card("sb", "ad_spend", next);
     expect(ad.value.state).toBe("missing");
     expect(ad.latest).toMatchObject({ period: wk, granularity: "week", value: { value: 1700 }, earlier: true, outside: [] });
+    expect(ad.value.value).toBeNull();                                   // shown with its own dates, never in the total
+    // A two-week range with one week reported: the earlier week is not used to fill the other one.
+    const two = await card("sb", "ad_spend", { start: "2030-11-02", end: "2030-11-15" });
+    expect(two.value.value === 1700 * 2 || two.value.value === 3400).toBe(false);
+    expect(two.value.state === "value" && two.value.flag !== "partial").toBe(false);
     // Nothing within about two months: no latest figure.
     expect((await card("sb", "ad_spend", { start: "2031-03-01", end: "2031-03-07" })).latest).toBeUndefined();
   });
@@ -168,6 +173,80 @@ describe("a week counts as received only with a clean, single-source figure", ()
     await pulled("sb", "submission.api", [{ metric: "ad_spend", value: 520 }]);
     await pulled("sb", "sheet.eos_scorecard", [{ metric: "ad_spend", value: 500 }]);
     expect(await sbAd()).toBe(false);
+  });
+
+  it("a genuine zero counts as received", async () => {
+    await freshDb();
+    await pulled("sb", "submission.api", [{ metric: "ad_spend", value: 0 }, { metric: "sessions", value: 800 }, { metric: "sessions_converted", value: 0 }]);
+    await pulled("p2s", "submission.api", [{ metric: "ad_spend", value: 0 }]);
+    expect((await missingWeeklyFigures(today)).missing).toEqual([]);
+    // Seven days of zero from one source count too.
+    await freshDb();
+    for (let i = 0; i < 7; i++) {
+      const d = addDays(w.start, i);
+      await pulled("sb", "sheet.daily_analytics", [{ metric: "ad_spend", value: 0 }], "complete", { start: d, end: d }, "day");
+    }
+    expect(await sbAd()).toBe(false);
+  });
+});
+
+describe("existing Perksradar submissions still work (no reporting pull)", () => {
+  it("a weekly report submission for Perksradar fills its cards; there is no Perksradar pull or source", async () => {
+    await freshDb();
+    const token = (await call("admin", "POST", "/settings/automation-clients", { label: "Weekly", sources: ["weekly_report"], businesses: ["perksradar"] })).body.token as string;
+    const wk2 = { start: "2030-11-02", end: "2030-11-08" };
+    const r = await call(null, "POST", "/submissions", { ...envelope("pr-1102", "perksradar", wk2), records: { observations: [
+      { metric: "signups", value: 12 }, { metric: "cards_added", value: 30 }, { metric: "reminders_sent", value: 200 }, { metric: "emails_opened", value: 0 }] } }, { authorization: `Bearer ${token}` });
+    expect(r.status).toBe(201);
+    const m = (await call("viewer", "GET", `/business/perksradar/summary?start=${wk2.start}&end=${wk2.end}&compare=none`)).body.metrics;
+    expect(["signups", "cards_added", "reminders_sent", "emails_opened"].map((k) => m.find((x: any) => x.key === k).value.value)).toEqual([12, 30, 200, 0]);
+    expect((await call("viewer", "GET", "/settings")).body.pulls.map((p: any) => p.kind)).not.toContain("perksradar");
+    expect(await q("select id from source_connections where id like '%perksradar%'")).toEqual([]);
+  });
+});
+
+describe("rollback cleanup of scorecard weekly figures", () => {
+  it("removes only the scorecard's weekly submissions; month totals and weekly report figures stay; refuses while syncs can write", async () => {
+    const { readFileSync } = await import("node:fs");
+    const sql = readFileSync("db/rollback/remove_scorecard_weekly_figures.sql", "utf8");
+    // Run as an operator would: on its own connection, closed afterwards (a refused run must leave nothing open).
+    const { Client } = await import("pg");
+    const runCleanup = async () => {
+      const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+      await c.connect();
+      try { await c.query(sql); } finally { await c.end(); }
+    };
+    await freshDb();
+    const W = { start: "2030-11-02", end: "2030-11-08" };
+    const eos = { sourceId: "sheet.eos_scorecard", submitter: "sheet:test", submissionSource: "eos_scorecard" };
+    const sub = (id: string, family: string, period: any, granularity: string, obs: any[]) => applyPulled({ schema_version: 1, submission_id: id, source: "eos_scorecard", business: "sb",
+      period: { ...period, granularity, timezone: "America/Los_Angeles" }, collected_at: "2030-11-20T08:00:00Z", completeness: "complete",
+      records: { observations: obs.map((o) => ({ scope: "all", period_start: period.start, period_end: period.end, granularity, ...o })) } }, family, eos, "test");
+    // Two revisions of one week (the first is superseded by the second), a month total, and a weekly report week.
+    await sub("eosw:sb:2030-11-02:aaa", "eosw:sb:2030-11-02", W, "week", [{ metric: "ad_spend", value: 1600 }]);
+    await sub("eosw:sb:2030-11-02:bbb", "eosw:sb:2030-11-02", W, "week", [{ metric: "ad_spend", value: 1650 }]);
+    await sub("eos:sb:2030-10:ccc", "eos:sb:2030-10", { start: "2030-10-01", end: "2030-10-31" }, "month", [{ metric: "ad_spend", value: 7000 }]);
+    const token = (await call("admin", "POST", "/settings/automation-clients", { label: "Weekly", sources: ["weekly_report"], businesses: ["sb"] })).body.token as string;
+    expect((await call(null, "POST", "/submissions", { ...envelope("wr-cleanup", "sb", W), records: { observations: [{ metric: "ad_spend", value: 1700 }] } }, { authorization: `Bearer ${token}` })).status).toBe(201);
+    expect((await q("select count(*)::int n from import_runs where submission_id like 'eosw:%' and superseded_by is not null"))[0].n).toBe(1);
+
+    // Refused while the scorecard source is active, and while one of its syncs is running.
+    const src = (await q("insert into sheet_sources (business_id, role, label, file_id, file_kind, created_by) values ('sb', 'eos_scorecard', 'EOS', 'TESTeosFILEid0000000000010', 'google_sheet', 't') returning id"))[0].id;
+    await expect(runCleanup()).rejects.toThrow(/Pause the EOS scorecard source first/);
+    expect((await q("select count(*)::int n from import_runs where submission_id like 'eosw:%'"))[0].n).toBe(2);   // refused: nothing changed
+    await q("update sheet_sources set active = false where role = 'eos_scorecard'");
+    await q("insert into sync_jobs (kind, sheet_source_id, trigger, actor, status, lease_until) values ('sheet', $1, 'manual', 't', 'running', now() + interval '5 minutes')", [src]);
+    await expect(runCleanup()).rejects.toThrow(/still queued or running/);
+    await q("update sync_jobs set status = 'succeeded', finished_at = now() where sheet_source_id = $1", [src]);
+
+    await runCleanup();
+    expect(await q("select submission_id from import_runs where submission_id like 'eosw:%'")).toEqual([]);
+    expect((await q("select count(*)::int n from observations where source_id = 'sheet.eos_scorecard' and granularity = 'week'"))[0].n).toBe(0);
+    expect((await q("select value::float8 v from observations where status = 'active' and source_id = 'sheet.eos_scorecard' and granularity = 'month'"))[0].v).toBe(7000);
+    expect((await q("select value::float8 v from observations where status = 'active' and source_id = 'submission.api' and granularity = 'week'"))[0].v).toBe(1700);
+    // The week now has one source: no conflict on the card (the previous build has no priority, and needs none here).
+    expect((await call("viewer", "GET", `/business/sb/summary?start=${W.start}&end=${W.end}&compare=none`)).body.metrics.find((x: any) => x.key === "ad_spend").value)
+      .toMatchObject({ state: "value", value: 1700 });
   });
 });
 
