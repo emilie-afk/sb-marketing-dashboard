@@ -18,7 +18,9 @@
 //   reads publish nothing, so the last good snapshot stays.
 // - Reconciliation (same transaction): copies of tasks missing from the tracker's authoritative in-scope list are
 //   removed, however old; occurrences outside their task's date span are removed; one-time tasks and occurrences
-//   inside the snapshot window that are missing are removed; other old occurrences stay as history. Upserts are
+//   inside the snapshot window that are missing are removed; open occurrences inside a task's closed periods (an
+//   archived owner's unfinished work, closed in the tracker) are removed however old, while done ones keep their
+//   credit; other old occurrences stay as history. Upserts are
 //   keyed by (source instance, record id), so retries are idempotent.
 import { z } from "zod";
 import type pg from "pg";
@@ -58,8 +60,10 @@ const itemSchema = z.object({
   if (it.kind === "occurrence" && it.due_date !== it.occurrence_date) ctx.addIssue({ code: "custom", message: "occurrence due date mismatch" });
   if (it.status === "done" && !it.completed_on) ctx.addIssue({ code: "custom", message: "done without completion date" });
 });
-const scopeTaskSchema = z.object({ task_id: uuid, recurring: z.boolean(), first_due: date.nullable(), until: date.nullable() }).strict()
-  .refine((t) => (t.recurring ? t.first_due !== null : t.first_due === null && t.until === null), "span mismatch");
+const closedPeriod = z.object({ from: date, to: date.nullable() }).strict().refine((p) => p.to === null || p.to >= p.from, "period ends before it starts");
+const scopeTaskSchema = z.object({ task_id: uuid, recurring: z.boolean(), first_due: date.nullable(), until: date.nullable(),
+  closed_periods: z.array(closedPeriod).max(500).optional() }).strict()
+  .refine((t) => (t.recurring ? t.first_due !== null : t.first_due === null && t.until === null && !t.closed_periods), "span mismatch");
 const removalSchema = z.object({ task_id: uuid, reason: z.enum(["deleted", "brand_unassigned", "brand_not_reported", "out_of_scope"]) }).strict();
 const pageSchema = z.object({
   schema_version: z.literal(2), source_instance: instance,
@@ -238,6 +242,35 @@ export async function publishSnapshot(s: Snapshot, deadline = Infinity) {
           and (r.kind = 'task' or r.occurrence_date < sp.first_due or (sp.until is not null and r.occurrence_date > sp.until))`,
       [s.instance, spans.map((t) => t.task_id), spans.map((t) => t.first_due), spans.map((t) => t.until)]);
     marked += outsideSpan.rowCount ?? 0;
+    // Closed work across the whole history: open occurrence copies dated inside a task's closed periods (the
+    // periods an archived person owned it). Done copies keep their credit. Works after any sync gap.
+    const closed = scope.flatMap((t) => (t.closed_periods ?? []).map((p) => ({ task_id: t.task_id, from: p.from, to: p.to })));
+    // Restored work: copies removed as closed, outside the snapshot window (inside it the snapshot itself decides),
+    // within their task's span and no longer inside any closed period, come back (the person was restored, or the
+    // series was reassigned for those dates). Their content is the last synced copy, as for other old history.
+    // Only businesses this dashboard currently accepts: a copy of an excluded business stays removed.
+    const spanTasks = scope.filter((t) => t.recurring);
+    const restored = await c.query(
+      `update tracker_task_records r set removed_at = null, removed_reason = null
+         from unnest($2::uuid[], $3::date[], $4::date[]) as sp(task_id, first_due, until)
+        where r.source_instance = $1 and r.removed_reason = 'closed' and r.kind = 'occurrence' and r.task_id = sp.task_id
+          and r.occurrence_date >= sp.first_due and (sp.until is null or r.occurrence_date <= sp.until)
+          and (r.occurrence_date < $5::date or r.occurrence_date > $6::date)
+          and r.business_id = any($10::text[])
+          and not exists (select 1 from unnest($7::uuid[], $8::date[], $9::date[]) as cp(task_id, from_d, to_d)
+                           where cp.task_id = r.task_id and r.occurrence_date >= cp.from_d and (cp.to_d is null or r.occurrence_date <= cp.to_d))`,
+      [s.instance, spanTasks.map((t) => t.task_id), spanTasks.map((t) => t.first_due), spanTasks.map((t) => t.until), s.window.from, s.window.to,
+        closed.map((x) => x.task_id), closed.map((x) => x.from), closed.map((x) => x.to), trackerBusinesses()]);
+    const restoredCount = restored.rowCount ?? 0;
+    if (closed.length) {
+      const closedRes = await c.query(
+        `update tracker_task_records r set removed_at = now(), removed_reason = 'closed'
+           from unnest($2::uuid[], $3::date[], $4::date[]) as cp(task_id, from_d, to_d)
+          where r.source_instance = $1 and r.removed_at is null and r.task_id = cp.task_id and r.kind = 'occurrence' and r.status = 'open'
+            and r.occurrence_date >= cp.from_d and (cp.to_d is null or r.occurrence_date <= cp.to_d)`,
+        [s.instance, closed.map((x) => x.task_id), closed.map((x) => x.from), closed.map((x) => x.to)]);
+      marked += closedRes.rowCount ?? 0;
+    }
     // Records the snapshot covered (one-time tasks, occurrences inside its window) but no longer contains.
     const gone = await c.query(
       `update tracker_task_records set removed_at = now(), removed_reason = 'not_in_snapshot'
@@ -247,7 +280,7 @@ export async function publishSnapshot(s: Snapshot, deadline = Infinity) {
     await beforeCommit();
     await c.query(`insert into tracker_snapshots (source_instance, snapshot_id, generated_at, window_from, window_to, record_count, removal_count, marked_removed)
                    values ($1,$2,$3,$4,$5,$6,$7,$8)`, [s.instance, s.id, s.generatedAt, s.window.from, s.window.to, s.items.length, s.removals.length, marked]);
-    return { records: s.items.length, removals: s.removals.length, marked_removed: marked };
+    return { records: s.items.length, removals: s.removals.length, marked_removed: marked, ...(restoredCount ? { restored: restoredCount } : {}) };
   });
 }
 

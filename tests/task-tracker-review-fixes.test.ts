@@ -85,6 +85,105 @@ describe("3. reconnecting after more than 180 days", () => {
   });
 });
 
+describe("closed work of archived staff, after a long sync gap", () => {
+  it("removes open copies inside closed periods across the whole history, keeps done copies and other owners' work", async () => {
+    const W = "44444444-4444-4444-8444-444444444444", V = "55555555-5555-4555-8555-555555555555";
+    // Synced months ago, when Ann (since archived) owned W until 31 May, then Ben from 1 June.
+    await insert(`occ:${W}:2026-03-02`, W, "occurrence", "2026-03-02", { status: "open" });      // Ann, unfinished: closed now
+    await insert(`occ:${W}:2026-03-09`, W, "occurrence", "2026-03-09");                         // Ann, done: keeps credit
+    await insert(`occ:${W}:2026-06-01`, W, "occurrence", "2026-06-01", { status: "open" });      // Ben's period: history
+    // V is still held by Ann: closed from its start, open-ended.
+    await insert(`occ:${V}:2026-04-06`, V, "occurrence", "2026-04-06", { status: "open" });
+    await insert(`occ:${V}:2026-04-13`, V, "occurrence", "2026-04-13");
+    handler = async () => reply(page([occ(W, "2026-11-16")], { scope: [
+      { task_id: W, recurring: true, first_due: "2026-03-02", until: null, closed_periods: [{ from: "2026-03-02", to: "2026-05-31" }] },
+      { task_id: V, recurring: true, first_due: "2026-04-06", until: null, closed_periods: [{ from: "2026-04-06", to: null }] },
+    ] }));
+    expect((await pullTaskTracker()).outcome).toBe("done");
+    const rows = Object.fromEntries((await state()).map((r: any) => [r.record_id, r]));
+    expect(rows[`occ:${W}:2026-03-02`]).toMatchObject({ removed: true, removed_reason: "closed" });
+    expect(rows[`occ:${W}:2026-03-09`]).toMatchObject({ removed: false, status: "done", assignee_name: "Ann Original" });
+    expect(rows[`occ:${W}:2026-06-01`].removed).toBe(false);
+    expect(rows[`occ:${V}:2026-04-06`]).toMatchObject({ removed: true });
+    expect(rows[`occ:${V}:2026-04-13`]).toMatchObject({ removed: false, status: "done" });
+    const items = (await call("viewer", "GET", "/tasks?from=2026-03-01&to=2026-06-30")).body.items.filter((t: any) => t.source === "tracker").map((t: any) => t.occurrence).sort();
+    expect(items).toEqual(["2026-03-09", "2026-04-13", "2026-06-01"]);
+  });
+  it("archive, sync, restore, sync across a long gap: restored work comes back, done work and in-window rules unchanged", async () => {
+    const R = "77777777-7777-4777-8777-777777777777";
+    // Synced long ago while Ann owned R (open and done copies, all far outside the current window).
+    await insert(`occ:${R}:2026-02-02`, R, "occurrence", "2026-02-02", { status: "open" });
+    await insert(`occ:${R}:2026-02-09`, R, "occurrence", "2026-02-09");
+    await insert(`occ:${R}:2026-02-16`, R, "occurrence", "2026-02-16", { status: "open" });
+    const scopeR = (closed: any[] | undefined) => ({ task_id: R, recurring: true, first_due: "2026-02-02", until: null, ...(closed ? { closed_periods: closed } : {}) });
+    const rows = async () => Object.fromEntries((await state()).filter((r: any) => r.record_id.includes(R)).map((r: any) => [r.record_id, r]));
+    // 1. Ann archived: the tracker reports her period as closed; open copies are removed, the done one stays.
+    handler = async () => reply(page([occ(R, "2026-11-16", { assignee: ANN, status: "done", completed_on: "2026-11-16" })], { scope: [scopeR([{ from: "2026-02-02", to: null }])] }));
+    expect((await pullTaskTracker()).outcome).toBe("done");
+    let r = await rows();
+    expect(r[`occ:${R}:2026-02-02`]).toMatchObject({ removed: true, removed_reason: "closed" });
+    expect(r[`occ:${R}:2026-02-16`]).toMatchObject({ removed: true, removed_reason: "closed" });
+    expect(r[`occ:${R}:2026-02-09`]).toMatchObject({ removed: false, status: "done" });
+    // A repeated sync while still archived changes nothing (idempotent).
+    expect((await pullTaskTracker()).outcome).toBe("done");
+    expect(await rows()).toEqual(r);
+    // 2. Ann restored: no closed periods any more; the old open copies come back as history with their owner.
+    handler = async () => reply(page([occ(R, "2026-11-16", { assignee: { ...ANN, archived: false } })], { scope: [scopeR(undefined)] }));
+    const out = await pullTaskTracker();
+    expect(out.outcome).toBe("done");
+    r = await rows();
+    expect(r[`occ:${R}:2026-02-02`]).toMatchObject({ removed: false, removed_reason: null, status: "open", assignee_name: "Ann Original" });
+    expect(r[`occ:${R}:2026-02-16`]).toMatchObject({ removed: false, removed_reason: null });
+    expect(r[`occ:${R}:2026-02-09`]).toMatchObject({ removed: false, status: "done" });
+    const items = (await call("viewer", "GET", "/tasks?from=2026-02-01&to=2026-02-28")).body.items.filter((t: any) => t.source === "tracker" && t.id.includes(R)).map((t: any) => t.occurrence).sort();
+    expect(items).toEqual(["2026-02-02", "2026-02-09", "2026-02-16"]);
+    // 3. Only closed removals are restored: a copy outside the task's span or removed for another reason stays removed.
+    await insert(`occ:${R}:2026-01-26`, R, "occurrence", "2026-01-26", { status: "open" });          // before first_due
+    await q("update tracker_task_records set removed_at = now(), removed_reason = 'closed' where record_id = $1", [`occ:${R}:2026-01-26`]);
+    await q("update tracker_task_records set removed_at = now(), removed_reason = 'not_in_snapshot' where record_id = $1", [`occ:${R}:2026-02-16`]);
+    expect((await pullTaskTracker()).outcome).toBe("done");
+    r = await rows();
+    expect(r[`occ:${R}:2026-01-26`].removed).toBe(true);
+    expect(r[`occ:${R}:2026-02-16`]).toMatchObject({ removed: true, removed_reason: "not_in_snapshot" });
+  });
+  it("restoration respects the businesses this dashboard accepts: an excluded business's closed copies stay removed", async () => {
+    const P = "88888888-8888-4888-8888-888888888888", S = "99999999-9999-4999-8999-999999999999";
+    process.env.TASK_TRACKER_BUSINESSES = "sb,p2s";
+    try {
+      await insert(`occ:${P}:2026-02-03`, P, "occurrence", "2026-02-03", { status: "open" });
+      await q("update tracker_task_records set business_id = 'p2s' where record_id = $1", [`occ:${P}:2026-02-03`]);
+      await insert(`occ:${S}:2026-02-03`, S, "occurrence", "2026-02-03", { status: "open" });
+      const span = (id: string, closed?: any[]) => ({ task_id: id, recurring: true, first_due: "2026-02-03", until: null, ...(closed ? { closed_periods: closed } : {}) });
+      const rows = async () => Object.fromEntries((await state()).filter((r: any) => r.record_id.includes(P) || r.record_id.includes(S)).map((r: any) => [r.record_id, r]));
+      // Archive sync while both businesses are accepted: both closed copies are removed as closed.
+      handler = async () => reply(page([], { scope: [span(P, [{ from: "2026-02-03", to: null }]), span(S, [{ from: "2026-02-03", to: null }])] }));
+      expect((await pullTaskTracker()).outcome).toBe("done");
+      let r = await rows();
+      expect([r[`occ:${P}:2026-02-03`].removed_reason, r[`occ:${S}:2026-02-03`].removed_reason]).toEqual(["closed", "closed"]);
+      // The dashboard now accepts sb only; the owner is restored (no closed periods any more).
+      process.env.TASK_TRACKER_BUSINESSES = "sb";
+      handler = async () => reply(page([], { scope: [span(P), span(S)] }));
+      const out = await pullTaskTracker();
+      expect(out.outcome).toBe("done");
+      expect((out.results[0] as any).restored).toBe(1);                                         // the permitted copy only
+      r = await rows();
+      expect(r[`occ:${S}:2026-02-03`]).toMatchObject({ removed: false, removed_reason: null });   // permitted business returns
+      expect(r[`occ:${P}:2026-02-03`].removed).toBe(true);                                       // excluded business stays removed
+      const shown = (await call("viewer", "GET", "/tasks?from=2026-02-01&to=2026-02-28")).body.items.filter((t: any) => t.source === "tracker" && (t.id.includes(P) || t.id.includes(S)));
+      expect(shown.map((t: any) => t.id.includes(S))).toEqual([true]);
+    } finally { delete process.env.TASK_TRACKER_BUSINESSES; }
+  });
+  it("rejects malformed closed periods and closed periods on one-time tasks, publishing nothing", async () => {
+    const before = await state();
+    const T = "66666666-6666-4666-8666-666666666666";
+    handler = async () => reply(page([], { scope: [{ task_id: T, recurring: true, first_due: "2026-03-02", until: null, closed_periods: [{ from: "2026-05-01", to: "2026-04-01" }] }] }));
+    await expect(pullTaskTracker()).rejects.toMatchObject({ code: "source_bad_response" });
+    handler = async () => reply(page([], { scope: [{ task_id: T, recurring: false, first_due: null, until: null, closed_periods: [{ from: "2026-05-01", to: null }] }] }));
+    await expect(pullTaskTracker()).rejects.toMatchObject({ code: "source_bad_response" });
+    expect(await state()).toEqual(before);
+  });
+});
+
 describe("4. the overall deadline", () => {
   const good = () => reply(page([occ(Y, "2026-11-23")], { scope: [{ task_id: Y, recurring: true, first_due: "2026-01-05", until: null }] }));
   /** Waits for `ms`, honoring the abort signal like a real transport. */
