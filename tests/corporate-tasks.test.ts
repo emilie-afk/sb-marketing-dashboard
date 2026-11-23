@@ -5,6 +5,7 @@ import { freshDb, q, app, closePool } from "./helpers";
 import { issueSession } from "../server/auth";
 import { _setReportingFetchForTests } from "../server/adapters/reportingClient";
 import { syncCorporateTasks, _resetCorporateSyncState } from "../server/corporateTasks";
+import { linkIntakeTasks } from "../server/intakeLinks";
 
 const OWNER = "planner@example.test";
 const SB_BRAND = "aaaaaaaa-1111-4111-8111-111111111111", STAFF = "bbbbbbbb-1111-4111-8111-111111111111", LAN = "bbbbbbbb-3333-4333-8333-333333333333", OMAR = "bbbbbbbb-2222-4222-8222-222222222222";
@@ -13,7 +14,7 @@ const people: Record<string, { name: string; brands: string[] }> = { [STAFF]: { 
 
 // ------------------------------------------------------------ fake Corporate Gifts (tasks + receipts)
 type CgT = { id: string; title: string; brief: string | null; owner_hint: string | null; due_date: string | null; slack_status: string; content_version: number;
-  delivery_status: string; delivered_version: number | null; tracker_task_id: string | null; partners: { name: string; url: string }[] };
+  delivery_status: string; delivered_version: number | null; tracker_task_id: string | null; partners: { name: string; url: string }[]; slack_sources?: { channel_id: string; message_ts: string; request_id?: string }[] };
 // caps: whether this Corporate Gifts accepts the shared "resolved" status (its migration 008); without it a "resolved"
 // receipt is refused, as the previous Corporate Gifts build does.
 const cg = { tasks: new Map<string, CgT>(), receipts: [] as any[], failReceipts: 0, caps: true, reset() { this.tasks.clear(); this.receipts = []; this.failReceipts = 0; this.caps = true; } };
@@ -27,7 +28,21 @@ function applyReceipt(r: any) {
 }
 // ------------------------------------------------------------ fake Task Tracker planning API
 type T = { key: string; plan_id: string; origin: string; task_id: string; title: string; brief: string | null; due_date: string; status: string; version: number; updated_at: string; assignee: string; brand: string };
-const tracker = { tasks: new Map<string, T>(), creates: 0, bodies: [] as any[], patches: 0, fences: new Map<string, number>(), reset() { this.tasks.clear(); this.creates = 0; this.bodies = []; this.patches = 0; this.fences.clear(); } };
+const tracker = { tasks: new Map<string, T>(), creates: 0, bodies: [] as any[], patches: 0, fences: new Map<string, number>(),
+  // Tasks Task Tracker's Slack intake created, by "channel:ts" (and "channel:ts:action"), for the one-request-one-task checks.
+  intake: new Map<string, T>(), linkCalls: 0, linkEndpoint: true,
+  reset() { this.tasks.clear(); this.creates = 0; this.bodies = []; this.patches = 0; this.fences.clear(); this.intake.clear(); this.linkCalls = 0; this.linkEndpoint = true; } };
+// Task Tracker's rule: a numbered source matches only the same request; an unnumbered one on a message with tasks is ambiguous.
+const intakeMatch = (sources: any[] = []) => {
+  const found = new Set<T>();
+  let ambiguous = false;
+  for (const s of sources) {
+    if (s.action_id) { const t = tracker.intake.get(`${s.channel_id}:${s.message_ts}:${s.action_id}`); if (t) found.add(t); }
+    else if ([...tracker.intake.keys()].some((k) => k.startsWith(`${s.channel_id}:${s.message_ts}:`))) ambiguous = true;
+  }
+  return ambiguous || found.size > 1 ? null : [...found];
+};
+const linkIntake = (t: T, b: any) => { const linked = { ...t, key: b.idempotency_key, plan_id: b.plan_id }; tracker.tasks.set(b.idempotency_key, linked); return linked; };
 let n = 0;
 const res = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const out = (t: T) => ({ idempotency_key: t.key, plan_id: t.plan_id, task_id: t.task_id, title: t.title, due_date: t.due_date, status: t.status, completed_on: null, recurring: false,
@@ -86,9 +101,22 @@ async function fakeFetch(url: string, init: any): Promise<Response> {
     if (t.status !== "done") { t.status = "done"; t.version++; t.updated_at = new Date().toISOString(); }
     return res(200, { task: out(t) });
   }
+  if (u.pathname === "/api/planning/v1/slack-links" && init.method === "POST") {
+    if (!tracker.linkEndpoint) return res(404, { error: { code: "not_found" } });
+    tracker.linkCalls++;
+    const b = JSON.parse(init.body);
+    const existing = tracker.tasks.get(b.idempotency_key);
+    if (existing) return res(200, { linked: true, task: out(existing) });
+    const m = intakeMatch(b.slack_sources);
+    if (!m || m.length !== 1) return res(200, { linked: false, reason: m ? "not_found" : "ambiguous" });
+    return res(200, { linked: true, task: out(linkIntake(m[0], b)) });
+  }
   if (u.pathname === "/api/planning/v1/tasks" && init.method === "POST") {
     const b = JSON.parse(init.body);
     tracker.bodies.push(b);
+    const m0 = tracker.tasks.has(b.idempotency_key) ? [] : intakeMatch(b.slack_sources);
+    if (m0 === null) return res(409, { error: { code: "needs_review", message: "Not sure which request of the message this is.", details: { task_exists: false, fenced_through: new Date(Date.parse(b.sent_at)).toISOString() } } });
+    if (m0.length === 1) return res(200, { created: false, linked: true, task: out(linkIntake(m0[0], b)) });
     const fence = tracker.fences.get(b.idempotency_key);
     if (fence !== undefined && Date.parse(b.sent_at) <= fence) return res(409, { error: { code: "stale_request" } });
     const existing = tracker.tasks.get(b.idempotency_key);
@@ -396,5 +424,87 @@ describe("Resolved, shared with Corporate Gifts", () => {
     await syncCorporateTasks();
     expect((await stateOf(b.id)).status).toBe("approved");
     expect(tracker.creates).toBe(1);
+  });
+});
+
+describe("one Slack request, one task: Task Tracker's Slack intake and the planning owner's queues", () => {
+  const CH = "C0TEAMMKT1";
+  const intakeTask = (key: string, title = "Intake task"): T => {
+    const t: T = { key: `slack-intake:${key}`, plan_id: "", origin: "slack", task_id: `ffffffff-0000-4000-8000-${String(++n).padStart(12, "0")}`, title, brief: null, due_date: "2026-12-01",
+      status: "open", version: 1, updated_at: new Date().toISOString(), assignee: STAFF, brand: SB_BRAND };
+    tracker.intake.set(key, t);
+    return t;
+  };
+  const suggestion = async (ts: string, action = "a1") => (await q(
+    `insert into review_suggestions (source_key, channel_id, message_ts, posted_at, excerpt, suggested_title, title)
+     values ($1, $2, $3, now(), 'Fictional request', 'Fictional title', 'Fictional title') returning id`, [`slack:${CH}:${ts}:${action}`, CH, ts]))[0].id as string;
+
+  it("stores a Corporate Gifts draft's Slack identity, with its request number, and sends it with the task", async () => {
+    cg.reset(); tracker.reset();
+    const t = cgTask({ slack_sources: [{ channel_id: CH, message_ts: "1795000000.000100", request_id: "a2" } as any] });
+    await owner("POST", "/review/corporate/refresh", {});
+    expect((await q("select slack_sources from corporate_task_drafts where id = $1", [t.id]))[0].slack_sources).toEqual([{ channel_id: CH, message_ts: "1795000000.000100", request_id: "a2" }]);
+    tracker.linkEndpoint = false;
+    const sent = await owner("POST", "/review/corporate/send", { ids: [t.id] });
+    expect(sent.body.results[0].outcome).toBe("created");
+    expect(tracker.bodies.at(-1)).toMatchObject({ slack_sources: [{ channel_id: CH, message_ts: "1795000000.000100", action_id: "a2" }], source_workflow: "corporate" });
+  });
+  it("links waiting items to the intake task of the same request only; nothing is sent twice", async () => {
+    cg.reset(); tracker.reset();
+    // One message with two requests: a1 "Write blog post", a2 "Send newsletter".
+    const blog = intakeTask(`${CH}:1795000100.000100:a1`, "Write blog post");
+    const letter = intakeTask(`${CH}:1795000100.000100:a2`, "Send newsletter");
+    const t = cgTask({ title: "Send newsletter", slack_sources: [{ channel_id: CH, message_ts: "1795000100.000100", request_id: "a2" } as any] });
+    const unnumbered = cgTask({ title: "Send newsletter (no number)", slack_sources: [{ channel_id: CH, message_ts: "1795000100.000100" }] });
+    await owner("POST", "/review/corporate/refresh", {});
+    const it2 = intakeTask(`${CH}:1795000200.000100:a1`, "Update the banner (from Slack)");
+    const sid = await suggestion("1795000200.000100", "a1");
+    const other = await suggestion("1795000300.000100", "a1");             // no intake task: stays for review
+    const r = await linkIntakeTasks();
+    expect(r).toMatchObject({ outcome: "done", linked: 2 });
+    expect((await q("select tracker_task_id from corporate_task_drafts where id = $1", [t.id]))[0].tracker_task_id).toBe(letter.task_id);
+    expect((await q("select tracker_task_id from corporate_task_drafts where id = $1", [t.id]))[0].tracker_task_id).not.toBe(blog.task_id);
+    expect(await item(t.id)).toMatchObject({ status: "approved", delivery: { status: "created", linked_from_slack_intake: true } });
+    // Without its request number the draft is not linked, and sending it creates nothing: it stays for review.
+    expect((await item(unnumbered.id)).status).toBe("pending");
+    const [s] = await q("select status, delivery_status, tracker_task_id, intake_linked_at from review_suggestions where id = $1", [sid]);
+    expect(s).toMatchObject({ status: "approved", delivery_status: "created", tracker_task_id: it2.task_id });
+    expect((await q("select status from review_suggestions where id = $1", [other]))[0].status).toBe("pending");
+    expect(tracker.creates).toBe(0);
+    await syncCorporateTasks();
+    expect(cg.tasks.get(t.id)).toMatchObject({ delivery_status: "delivered", tracker_task_id: letter.task_id });
+    expect((await linkIntakeTasks()).linked).toBe(0);
+  });
+  it("reaches every waiting item in turn, however long the queue (least recently checked first)", async () => {
+    cg.reset(); tracker.reset();
+    await q("update review_suggestions set status = 'dismissed' where status = 'pending'");
+    const ids: string[] = [];
+    for (let i = 0; i < 51; i++) ids.push(await suggestion(`17950${String(10000 + i)}.000100`, "a1"));
+    await linkIntakeTasks();
+    await linkIntakeTasks();
+    expect((await q("select count(*)::int n from review_suggestions where id = any($1::uuid[]) and intake_checked_at is not null", [ids]))[0].n).toBe(51);
+    // The oldest item now matches an intake task: it is linked within the next two runs.
+    intakeTask(`${CH}:1795010000.000100:a1`, "Oldest request");
+    let linked = 0;
+    for (let run = 0; run < 2 && !linked; run++) linked += (await linkIntakeTasks()).linked;
+    expect(linked).toBe(1);
+    expect((await q("select status from review_suggestions where id = $1", [ids[0]]))[0].status).toBe("approved");
+  });
+  it("leaves items for review when Task Tracker has no link endpoint yet", async () => {
+    cg.reset(); tracker.reset();
+    tracker.linkEndpoint = false;
+    intakeTask(`${CH}:1795000400.000100:a1`);
+    const t = cgTask({ slack_sources: [{ channel_id: CH, message_ts: "1795000400.000100", request_id: "a1" } as any] });
+    await owner("POST", "/review/corporate/refresh", {});
+    expect((await linkIntakeTasks()).outcome).toBe("unavailable");
+    expect((await item(t.id)).status).toBe("pending");
+  });
+  it("builds the Slack identity sent with review-queue and plan items from the source key only", async () => {
+    const { reviewSources, corporateSources } = await import("../server/trackerDelivery");
+    expect(reviewSources(`slack:${CH}:1795000500.000100:a2`)).toEqual({ slack_sources: [{ channel_id: CH, message_ts: "1795000500.000100", action_id: "a2" }], source_workflow: "review" });
+    expect(reviewSources("not-a-key")).toBeNull();
+    expect(corporateSources([{ channel_id: CH, message_ts: "1795000500.000100", request_id: "a3", permalink: "https://x.slack.com/archives/x" }])).toEqual({ slack_sources: [{ channel_id: CH, message_ts: "1795000500.000100", action_id: "a3" }], source_workflow: "corporate" });
+    expect(corporateSources([{ channel_id: CH, message_ts: "1795000500.000100" }])).toEqual({ slack_sources: [{ channel_id: CH, message_ts: "1795000500.000100" }], source_workflow: "corporate" });
+    expect(corporateSources([])).toBeNull();
   });
 });

@@ -60,3 +60,7 @@ the planning `complete` route.
 Migration `014_corporate_tasks.sql`; rollback `db/rollback/014_corporate_tasks.down.sql` (tasks already in Task Tracker
 stay there). Requires Corporate Gifts with migration 007 (the `corporate-tasks` and `corporate-task-receipts`
 reporting routes) and the existing Task Tracker planning credential.
+
+## One Slack request, one task
+
+Corporate Gifts sends each request's Slack identity (channel id, message ts and, when its scanner recorded it, the request's number within the message; feed v=2 `slack_sources`). If Task Tracker's Slack intake already created a task for the same request (same message and number), the hourly pull links the waiting draft to it (shown as **Linked: created from Slack**), reports it to Corporate Gifts as delivered with that task, and never sends it again. A sent draft carries the same identity, so Task Tracker links instead of creating a second task. A draft without a request number is never linked automatically when the message already has tasks in Task Tracker: it stays for review, and sending it is refused (`needs_review`) rather than creating a second task. Requires migration `019_slack_request_links.sql`.

@@ -20,7 +20,7 @@ import type { Session } from "./auth";
 import { isPlanningOwner, PLAN_BUSINESSES, BUSINESS_LABEL, nameItem, type AsgInput } from "./planning";
 import { trackerDirectory, planningTrackerConfigured, type Directory } from "./adapters/planningClient";
 import { trackerOrigin } from "./adapters/taskTracker";
-import { deliverClaimed, checkAgainstDirectory, claimedTimes, reconcile, setDelivery } from "./trackerDelivery";
+import { deliverClaimed, checkAgainstDirectory, claimedTimes, reconcile, setDelivery, reviewSources } from "./trackerDelivery";
 import { hit, clientKey } from "./rateLimit";
 import { isIsoDate } from "../shared/dates";
 import { loadOccasionIndex, matchSuggestion, storeMatch, placeOccasion, type OccasionIndex } from "./occasionLinks";
@@ -153,7 +153,7 @@ const COLS = `s.id, s.source_key, s.channel_id, s.message_ts, s.thread_ts, s.pos
   s.title, s.brief, s.business_id, s.tracker_brand_id, s.tracker_brand_name, s.tracker_assignee_id, s.tracker_assignee_name, to_char(s.due_date,'YYYY-MM-DD') due_date,
   s.status, s.reviewed_at, s.edited, s.version, s.delivery_status, s.delivery_error, s.last_attempt_at, s.highest_sent_at, s.fenced_through,
   s.tracker_task_id, s.tracker_version, s.tracker_title, to_char(s.tracker_due_date,'YYYY-MM-DD') tracker_due_date, s.tracker_status, s.tracker_assignee_name_now,
-  s.tracker_updated_at, s.created_at, s.updated_at,
+  s.tracker_updated_at, s.created_at, s.updated_at, s.intake_linked_at,
   s.plan_id, s.plan_assignment_id, s.planned_at, mp.name plan_name, mp.status plan_status, pa.delivery_status plan_assignment_delivery, pa.send_to_tracker plan_assignment_send,
   s.occasion_status, s.occasion_id, s.occasion_year, s.occasion_candidates, s.occasion_matched_at, s.occasion_confirmed_at, to_char(s.prep_date,'YYYY-MM-DD') prep_date, go.name occasion_name,
   r.status sync_status, to_char(r.due_date,'YYYY-MM-DD') sync_due_date, r.title sync_title, r.assignee_name sync_assignee_name, r.source_updated_at sync_updated_at, r.removed_at sync_removed_at`;
@@ -201,7 +201,7 @@ function dto(s: any, followups: any[] = [], idx: OccasionIndex | null = null) {
       brand: s.tracker_brand_id ? { id: s.tracker_brand_id, name: s.tracker_brand_name } : null,
       assignee: s.tracker_assignee_id ? { id: s.tracker_assignee_id, name: s.tracker_assignee_name } : null, due_date: s.due_date },
     needs: needs(s),
-    delivery: { status: s.delivery_status, error: s.delivery_error, last_attempt_at: s.last_attempt_at },
+    delivery: { status: s.delivery_status, error: s.delivery_error, last_attempt_at: s.last_attempt_at, linked_from_slack_intake: !!s.intake_linked_at },
     task: taskOf(s),
     plan: s.status === "planned" ? { id: s.plan_id, name: s.plan_name ?? null, status: s.plan_status ?? null, planned_at: s.planned_at,
       // The plan's own item: removed if it was deleted from the plan (or the plan was deleted); otherwise its send state.
@@ -340,7 +340,8 @@ export async function createFromSuggestion(s: Session, id: string, version: numb
       return { outcome: "failed", message: "Task Tracker is not connected.", suggestion: await getSuggestion(s, id) };
     }
     const r = await deliverClaimed("review_suggestions", { id, business: cur.business_id, previous: claim.previous, highestSentAt: claim.highestSentAt, fencedThrough: claim.fencedThrough,
-      payload: { brand_id: cur.tracker_brand_id, assignee_id: cur.tracker_assignee_id, title: cur.title, brief: cur.brief ?? "", due_date: cur.due_date_s } },
+      payload: { brand_id: cur.tracker_brand_id, assignee_id: cur.tracker_assignee_id, title: cur.title, brief: cur.brief ?? "", due_date: cur.due_date_s },
+      sources: reviewSources(cur.source_key) },
       id, "review", await dirOrNull());
     return { outcome: r.outcome, existing: r.existing, code: r.code, message: r.message, suggestion: await getSuggestion(s, id) };
   } finally {
