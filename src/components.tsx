@@ -187,6 +187,7 @@ export function ProductsBlock({ p, onVendor }: { p: any; onVendor?: (id: string)
     : <div className="sub">None.</div>;
   return (
     <div>
+      {p.exact === false && p.nearestNote && <div className="state warn" style={{ marginBottom: 8 }}>{p.nearestNote}</div>}
       <div className="sub" style={{ marginBottom: 8 }}>{p.scopeLabel}. Of {p.costCoverage.products} products, {p.costCoverage.missingCost} have no cost (no gross profit shown, never zero) and {p.costCoverage.partialCost} have partial costs (profit labelled incomplete). Profit leaders rank complete figures only.</div>
       <div className="grid g4">
         <div className="card flat"><h3>Revenue leaders</h3><PT rows={p.revenueLeaders} value={(r) => money(r.revenue)} /></div>

@@ -112,7 +112,7 @@ export async function buildSnapshot(b: string | null, start: string, end: string
       performance, advertising: await advertising(b, range),
       promotions: { current: await promotionsInPeriod(b, start, end), upcoming: [], note: "Promotions whose dates overlap this period. Dates do not prove a launch; see execution status." },
       activities: activities.map(({ import_run_id, ...a }: any) => a),
-      products: !b || b === "sb" ? await productsAndVendors("sb", range, "previous_period") : null,
+      products: !b || b === "sb" ? await productsAndVendors("sb", range, "previous_period", {}, { nearest: false }) : null,
       corporate_gifts: await corporateCompletedInPeriod(b, start, end),
     },
     runs: [...runIds] as string[],
