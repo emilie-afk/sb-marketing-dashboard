@@ -20,6 +20,7 @@ h1, h2, h3, h4 { color: var(--brand-deep); margin: 0; }
 
 /* header */
 .topbar { display: flex; align-items: center; gap: 16px; justify-content: space-between; flex-wrap: wrap; }
+.signin-logo { display: block; width: 120px; height: auto; margin: 0 0 14px; }
 .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .brand img { width: 64px; height: auto; }
 .brand h1 { font-size: clamp(24px, 4vw, 34px); font-weight: 850; letter-spacing: -.02em; line-height: 1; }
