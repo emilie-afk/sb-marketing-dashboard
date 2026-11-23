@@ -29,7 +29,7 @@ import { assertReviewer } from "./review";
 import { trackerDirectory, planningTrackerConfigured, changeTrackerDueDate, completeTrackerTask, readTrackerTasks, type Directory } from "./adapters/planningClient";
 import { openUrl } from "./adapters/taskTracker";
 import { fetchCorporateTasks, sendTaskReceipts, corporateGiftingCredentials, fetchCheckoffs, sendTaskActions, type CgTask, type TaskReceipt, type FeedCursor } from "./adapters/corporateGifting";
-import { deliverClaimed, checkAgainstDirectory, claimedTimes, reconcile, setDelivery, storeTask, idempotencyKey } from "./trackerDelivery";
+import { deliverClaimed, checkAgainstDirectory, claimedTimes, reconcile, setDelivery, storeTask, idempotencyKey, corporateSources } from "./trackerDelivery";
 import { logServerError } from "./redact";
 import { isIsoDate, todayIn, OPERATIONS_TZ } from "../shared/dates";
 
@@ -114,13 +114,14 @@ async function upsertDraft(t: CgTask, brand: { id: string; name: string } | null
       if (t.slack_status !== "open" || ["dismissed", "delivered", "resolved"].includes(t.delivery_status) || (t.route ?? "marketing") !== "marketing" || t.resolution) return "skipped";
       await c.query(
         `insert into corporate_task_drafts (id, cg_title, cg_brief, owner_hint, partners, cg_due_date, slack_status, cg_delivery_status, cg_content_version,
-           title, brief, due_date, tracker_brand_id, tracker_brand_name, tracker_assignee_id, tracker_assignee_name, receipt_due)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$2,$3,$6,$10,$11,$12,$13,true)`,
-        [t.id, ...cg, brand?.id ?? null, brand?.name ?? null, brand && person ? person.id : null, brand && person ? person.name : null]);
+           title, brief, due_date, tracker_brand_id, tracker_brand_name, tracker_assignee_id, tracker_assignee_name, receipt_due, slack_sources)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$2,$3,$6,$10,$11,$12,$13,true,$14)`,
+        [t.id, ...cg, brand?.id ?? null, brand?.name ?? null, brand && person ? person.id : null, brand && person ? person.name : null, JSON.stringify(t.slack_sources ?? [])]);
       return "added";
     }
     await c.query(`update corporate_task_drafts set cg_title = $2, cg_brief = $3, owner_hint = $4, partners = $5, cg_due_date = $6, slack_status = $7,
-                     cg_delivery_status = $8, cg_content_version = $9, cg_read_at = now(), updated_at = now() where id = $1`, [t.id, ...cg]);
+                     cg_delivery_status = $8, cg_content_version = $9, cg_read_at = now(), updated_at = now(),
+                     slack_sources = case when jsonb_array_length($10::jsonb) > 0 then $10::jsonb else slack_sources end where id = $1`, [t.id, ...cg, JSON.stringify(t.slack_sources ?? [])]);
     if (cur.status === "resolved") return "unchanged";
     const res = t.resolution;
     // Resolved (handled without a task) and dismissed drafts are closed: a later read never reopens them.
@@ -303,7 +304,7 @@ function dto(d: any) {
       assignee: d.tracker_assignee_id ? { id: d.tracker_assignee_id, name: d.tracker_assignee_name } : null },
     source: { title: d.cg_title, brief: d.cg_brief, owner_hint: d.owner_hint, due_date: d.cg_due_s, partners: d.partners, slack_status: d.slack_status, read_at: d.cg_read_at },
     needs: d.status === "pending" || d.delivery_status === "failed" ? needs(d) : [],
-    delivery: { status: d.delivery_status, error: d.delivery_error, last_attempt_at: d.last_attempt_at },
+    delivery: { status: d.delivery_status, error: d.delivery_error, last_attempt_at: d.last_attempt_at, linked_from_slack_intake: !!d.intake_linked_at },
     task: d.tracker_task_id ? { status: d.tracker_status, title: d.tracker_title, due_date: d.tracker_due_s, assignee: d.tracker_assignee_name_now ?? d.tracker_assignee_name, open_url: openUrl(d.tracker_task_id) } : null,
     receipt: { state: d.receipt_state, due: d.receipt_due },
     sent_brief: trackerBrief({ brief: d.brief, partners: d.partners ?? [], owner_hint: d.owner_hint }),
@@ -477,7 +478,8 @@ async function sendOne(id: string, dir: Directory | null) {
       return { id, outcome: "failed", message: "Task Tracker is not connected." };
     }
     const r = await deliverClaimed(T, { id, business: BUSINESS, previous: claim.previous, highestSentAt: (claim as any).highestSentAt, fencedThrough: (claim as any).fencedThrough,
-      payload: { brand_id: cur.tracker_brand_id, assignee_id: cur.tracker_assignee_id, title: cur.title, brief: trackerBrief({ brief: cur.brief, partners: cur.partners ?? [], owner_hint: cur.owner_hint }), due_date: cur.due_date_s } },
+      payload: { brand_id: cur.tracker_brand_id, assignee_id: cur.tracker_assignee_id, title: cur.title, brief: trackerBrief({ brief: cur.brief, partners: cur.partners ?? [], owner_hint: cur.owner_hint }), due_date: cur.due_date_s },
+      sources: corporateSources(cur.slack_sources) },
       id, "review", dir);
     if (r.outcome === "created") await query("update corporate_task_drafts set synced_content_version = cg_content_version where id = $1", [id]);
     return r;

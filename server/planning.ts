@@ -15,7 +15,9 @@ import type { Session } from "./auth";
 import { addDays, daysInMonth, todayIn, OPERATIONS_TZ, isIsoDate, formatRange } from "../shared/dates";
 import { createTrackerTask, sentAtNow, readTrackerTasks, changeTrackerDueDate, trackerDirectory, planningTrackerConfigured, type TrackerTask, type Directory } from "./adapters/planningClient";
 import { trackerOrigin } from "./adapters/taskTracker";
-import { deliverClaimed, checkAgainstDirectory, idempotencyKey, storeTask as storeTaskIn, setDelivery as setDeliveryIn } from "./trackerDelivery";
+import { deliverClaimed, checkAgainstDirectory, idempotencyKey, storeTask as storeTaskIn, setDelivery as setDeliveryIn, reviewSources } from "./trackerDelivery";
+import type { Sources } from "./adapters/planningClient";
+const planSources = (sourceKey: string | undefined): Sources | null => { const r = reviewSources(sourceKey); return r ? { ...r, source_workflow: "plan" } : null; };
 
 export const CHANNELS = ["Email", "Facebook", "Instagram", "LinkedIn", "Pinterest", "TikTok", "YouTube", "Google Ads", "Website", "Amazon", "Etsy", "Faire", "PR", "Other"] as const;
 export const PLAN_BUSINESSES = ["sb", "p2s", "perksradar"] as const;
@@ -486,8 +488,11 @@ export async function sendPending(planId: string) {
       const claim = await claimForSend(planId, row.id);
       if (!claim) continue;                                   // removed by an edit before the send started, or created meanwhile
       const { plan: p, a, previous, highestSentAt, fencedThrough } = claim;
+      // A plan item added from the Slack review queue carries that Slack request, so Task Tracker never duplicates it.
+      const fromReview = await query<{ source_key: string }>("select source_key from review_suggestions where plan_assignment_id = $1", [a.id]);
       const r = await deliverClaimed("plan_assignments", { id: a.id, business: p.business_id, previous, highestSentAt, fencedThrough,
-        payload: { brand_id: a.tracker_brand_id, assignee_id: a.tracker_assignee_id, title: a.title, brief: briefFor(p, a), due_date: a.due_date } }, planId, "plan", dir);
+        payload: { brand_id: a.tracker_brand_id, assignee_id: a.tracker_assignee_id, title: a.title, brief: briefFor(p, a), due_date: a.due_date },
+        sources: planSources(fromReview[0]?.source_key) }, planId, "plan", dir);
       results.push({ assignment_id: r.id, outcome: r.outcome, existing: r.existing, code: r.code, message: r.message });
     }
     return results;

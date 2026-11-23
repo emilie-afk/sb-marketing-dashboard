@@ -100,6 +100,7 @@ export function CorporateTasks() {
               ]} /> : <span className={`chip ${["dismissed", "resolved"].includes(it.status) ? "muted" : ""}`}>{STATUS[it.status]}{it.resolved_in === "corporate_gifts" ? " in Corporate Gifts" : ""}</span>}
               {it.cg_state === "resolved" && it.status !== "resolved" && !it.task && <div className="sub">Resolved in Corporate Gifts: closes here once Task Tracker confirms no task.</div>}
               {!["pending", "dismissed", "resolved"].includes(it.status) && <> <span className={`chip ${["failed", "unknown"].includes(it.delivery.status) ? "bad" : it.delivery.status === "sending" ? "warn" : ""}`}>{DELIVERY[it.delivery.status]}</span></>}
+              {it.delivery.linked_from_slack_intake && <> <span className="chip muted" title="Task Tracker's Slack intake had already created this task from the same Slack message; this draft was linked to it.">Linked: created from Slack</span></>}
               {it.task && <> <span className="chip muted">{TASK[it.task.status] ?? it.task.status}</span></>}
               {it.task && it.resolution?.state === "resolved" && <> <span className="chip">Resolved {fmtDate(it.resolution.completed_on)}</span></>}
               {it.resolution?.state === "requested" && <> <span className={`chip ${it.resolution.error ? "bad" : ""}`}>{it.resolution.error ? `Resolve failed: ${it.resolution.error}` : "Resolving in Task Tracker…"}</span></>}</td>

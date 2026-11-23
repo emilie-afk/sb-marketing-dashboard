@@ -53,7 +53,10 @@ export type CreateOutcome =
   | { kind: "refused"; status: number; code: string; message: string; task_exists: false | null; fenced_through: string | null }
   | { kind: "unknown"; message: string };                                     // may or may not exist: retry with the same key
 
-export async function createTrackerTask(input: { key: string; plan_id: string; brand_id: string; assignee_id: string; title: string; brief: string; due_date: string; sent_at: string; supersedes_sent_at: string | null; origin?: "plan" | "review" }): Promise<CreateOutcome> {
+export type SlackSource = { channel_id: string; message_ts: string; action_id?: string | null };
+export type SourceWorkflow = "review" | "corporate" | "plan";
+export type Sources = { slack_sources: SlackSource[]; source_workflow: SourceWorkflow };
+export async function createTrackerTask(input: { key: string; plan_id: string; brand_id: string; assignee_id: string; title: string; brief: string; due_date: string; sent_at: string; supersedes_sent_at: string | null; origin?: "plan" | "review"; sources?: Sources | null }): Promise<CreateOutcome> {
   const c = cfg();
   let r;
   try {
@@ -61,6 +64,7 @@ export async function createTrackerTask(input: { key: string; plan_id: string; b
       idempotency_key: input.key, plan_id: input.plan_id, brand_id: input.brand_id, assignee_id: input.assignee_id, title: input.title, brief: input.brief || null, due_date: input.due_date,
       sent_at: input.sent_at, supersedes_sent_at: input.supersedes_sent_at,
       ...(input.origin && input.origin !== "plan" ? { origin: input.origin } : {}),
+      ...(input.sources?.slack_sources.length ? { slack_sources: input.sources.slack_sources, source_workflow: input.sources.source_workflow } : {}),
     }, LABEL, PLANNING_TIMEOUT_MS);
   } catch (e: any) {
     return { kind: "unknown", message: e?.message ?? "Task Tracker could not be reached." };
@@ -73,6 +77,28 @@ export async function createTrackerTask(input: { key: string; plan_id: string; b
   if (r.status === 401) return { kind: "refused", status: r.status, code: "tracker_auth", message: "Task Tracker refused the planning credential.", task_exists: null, fenced_through: null };
   if (r.status === 503) return { kind: "refused", status: r.status, code: r.body?.error?.code ?? "planning_disabled", message: r.body?.error?.message ?? "Task Tracker has planning turned off.", task_exists: null, fenced_through: null };
   return { kind: "unknown", message: `Task Tracker answered ${r.status}.` };
+}
+
+/**
+ * Links an item still waiting for review to the task Task Tracker's Slack intake already created for the same Slack
+ * request. Never creates a task. Returns the task when linked (or already linked to this id).
+ */
+export type LinkOutcome = { kind: "linked"; task: TrackerTask } | { kind: "not_linked"; reason: string } | { kind: "unavailable"; message: string };
+export async function linkTrackerTask(input: { key: string; plan_id: string; origin?: "plan" | "review"; sources: Sources }): Promise<LinkOutcome> {
+  const c = cfg();
+  let r;
+  try {
+    r = await sendJson(c.origin, "POST", "/api/planning/v1/slack-links", c.headers, {
+      idempotency_key: input.key, plan_id: input.plan_id, ...(input.origin && input.origin !== "plan" ? { origin: input.origin } : {}),
+      slack_sources: input.sources.slack_sources, source_workflow: input.sources.source_workflow,
+    }, LABEL, PLANNING_TIMEOUT_MS);
+  } catch (e: any) {
+    return { kind: "unavailable", message: e?.message ?? "Task Tracker could not be reached." };
+  }
+  if (r.status === 200 && r.body?.linked === true && validTask(r.body?.task)) return { kind: "linked", task: r.body.task };
+  if (r.status === 200 && r.body?.linked === false) return { kind: "not_linked", reason: String(r.body?.reason ?? "not_found").slice(0, 40) };
+  // An older Task Tracker without the endpoint, or any refusal: nothing is linked; the item stays for review.
+  return { kind: "unavailable", message: r.body?.error?.message ?? `Task Tracker answered ${r.status}.` };
 }
 
 export async function readTrackerTasks(keys: string[]): Promise<TrackerTask[]> {

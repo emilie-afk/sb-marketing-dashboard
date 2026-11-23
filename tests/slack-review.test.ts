@@ -238,7 +238,11 @@ describe("review and create", () => {
     expect(tracker.creates).toBe(1);
     const sent = tracker.bodies[0];
     expect(sent).toMatchObject({ idempotency_key: `mkp:${s.id}`, plan_id: s.id, origin: "review", title: "Order sample pots", brief: "Order three sample pots and share photos.", due_date: "2026-12-04", assignee_id: THAO });
-    expect(JSON.stringify(sent)).not.toMatch(/Synthetic|slack/i);
+    // Nothing from Slack but the message's identity (so Task Tracker keeps one task per Slack request): no text or links.
+    const { slack_sources, source_workflow, ...rest } = sent;
+    expect(JSON.stringify(rest)).not.toMatch(/Synthetic|slack/i);
+    expect(slack_sources).toEqual([{ channel_id: expect.stringMatching(/^[A-Z0-9]{6,20}$/), message_ts: expect.stringMatching(/^\d+\.\d{6}$/), action_id: "a1" }]);
+    expect(source_workflow).toBe("review");
     const d = (await owner("GET", `/review/suggestions/${s.id}`)).body.suggestion;
     expect(d).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { status: "open", open_url: expect.stringContaining("/#/tasks/") }, locked: true });
     expect((await fill(s.id)).status).toBe(409);                                    // the task now belongs to Task Tracker
@@ -662,7 +666,8 @@ describe("in-place status actions", () => {
     expect(retry.body).toMatchObject({ outcome: "created" });
     expect(tracker.creates).toBe(1);
     expect(retry.body.suggestion).toMatchObject({ status: "approved", delivery: { status: "created" }, task: { open_url: expect.stringContaining("/#/tasks/") } });
-    expect(JSON.stringify(tracker.bodies)).not.toMatch(/Synthetic|slack/i);
+    expect(JSON.stringify(tracker.bodies.map(({ slack_sources, source_workflow, ...rest }: any) => rest))).not.toMatch(/Synthetic|slack/i);
+    expect(tracker.bodies.every((x: any) => x.slack_sources.every((y: any) => Object.keys(y).sort().join() === "action_id,channel_id,message_ts"))).toBe(true);
     const t = [...tracker.tasks.values()][0];
     await q(`insert into tracker_task_records (source_instance, record_id, task_id, kind, business_id, title, task_type, brand_name, assignee_name, status, due_date, created_on, source_updated_at, snapshot_id)
              values ('tracker-test', $1, $2, 'task', 'sb', $3, 'adhoc', 'Succulents Box', 'Thao', 'open', '2027-03-15', '2026-11-18', now(), 'snp_${"0".repeat(32)}')`, [`task:${t.task_id}`, t.task_id, t.title]);

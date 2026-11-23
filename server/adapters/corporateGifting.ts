@@ -181,6 +181,11 @@ const cgTaskSchema = z.object({
     source: z.enum(["manual", "slack"]).nullable(),
     by: z.string().max(120).nullable(),
   }).nullable().default(null),
+  // The Slack messages the request came from, identity only (feed v2). Sent to Task Tracker with the task so a Slack
+  // request its direct intake already turned into a task is linked, not duplicated.
+  // request_id: the request's number within the message (a1, a2, …), shared with Task Tracker's Slack intake.
+  slack_sources: z.array(z.object({ channel_id: z.string().regex(/^[A-Z0-9]{6,20}$/), message_ts: z.string().regex(/^\d{9,11}\.\d{6}$/),
+    request_id: z.string().regex(/^a[0-9]{1,2}$/).optional() })).max(10).default([]),
   // Links must point at the Corporate Gifting app itself (its configured origin).
   partners: z.array(z.object({ name: z.string().min(1).max(120), url: z.string().url().max(500).refine((u) => {
     try { return new URL(u).origin === originOf(process.env.CORPORATE_GIFTING_API_URL); } catch { return false; }

@@ -357,6 +357,7 @@ function SuggestionDetail({ id }: { id: string }) {
           <div className="row">
             <span className={`chip ${it.status === "pending" ? "warn" : it.status === "dismissed" || it.status === "resolved" ? "muted" : ""}`} title="Review status">{STATUS[it.status]}</span>
             {it.status === "approved" && <span className={`chip ${["failed", "unknown"].includes(it.delivery.status) ? "bad" : ""}`} title="Task Tracker delivery">{DELIVERY[it.delivery.status]}</span>}
+            {it.delivery.linked_from_slack_intake && <span className="chip muted" title="Task Tracker's Slack intake had already created this task from the same Slack message; this item was linked to it.">Linked: created from Slack</span>}
           </div>
         </div>
         <h3>From Slack <span className="sub">(private)</span></h3>
@@ -420,7 +421,7 @@ function SuggestionDetail({ id }: { id: string }) {
       {planPick && <AddToPlanDrawer it={it} onClose={() => setPlanPick(false)} onDone={(_x, text) => { setPlanPick(false); setMsg(text); s.reload(); changed(); }} />}
       {preview && <Drawer onClose={() => setPreview(null)}>
         <h2>Create task</h2>
-        <p className="sub">This exact task is created in Task Tracker. Nothing from Slack is sent. Creating it again never makes a second task.</p>
+        <p className="sub">This exact task is created in Task Tracker. Only the Slack message's identity is sent (channel and time, never its text), so a task already created from the same message is linked instead. Creating it again never makes a second task.</p>
         <dl className="kv"><dt>Title</dt><dd><b>{preview.send.title}</b></dd><dt>Business</dt><dd>{preview.send.business ?? "—"}</dd><dt>Brand</dt><dd>{preview.send.brand ?? "—"}</dd>
           <dt>Assignee</dt><dd>{preview.send.assignee ?? "—"}</dd><dt>Due date</dt><dd>{fmtDate(preview.send.due_date) || "—"}</dd><dt>Brief</dt><dd style={{ whiteSpace: "pre-wrap" }}>{preview.send.brief || "—"}</dd></dl>
         {preview.problems.length > 0 && <div className="notice">Before creating it: {preview.problems.join("; ")}.</div>}

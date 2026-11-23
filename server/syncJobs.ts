@@ -18,6 +18,7 @@ import { pullGrossProfit, grossProfitConfigured, GP_SOURCE_ID } from "./adapters
 import { pullCorporateGifting, corporateGiftingConfigured, corporateGiftingHeld, CG_SOURCE_ID } from "./adapters/corporateGifting";
 import { pullTaskTracker, taskTrackerConfigured, TT_SOURCE_ID } from "./adapters/taskTracker";
 import { syncCorporateTasks } from "./corporateTasks";
+import { linkIntakeTasks } from "./intakeLinks";
 import { logServerError, redact } from "./redact";
 
 export const JOB_LIMITS = {
@@ -40,6 +41,9 @@ export const PULLS: Record<PullKind, { sourceId: string; label: string; configur
   task_tracker: { sourceId: TT_SOURCE_ID, label: "Task Tracker", configured: taskTrackerConfigured, run: async (a) => {
     const r = await pullTaskTracker(a);
     await syncCorporateTasks().catch(() => {});
+    // Waiting review items and Corporate Gifts drafts whose Slack request Task Tracker's Slack intake already turned into
+    // a task are linked to it (never sent again). Errors never change the pull's result.
+    await linkIntakeTasks().catch(() => {});
     return r;
   } },
 };
