@@ -5,7 +5,7 @@ import { trackerWorkRows } from "../trackerTasks";
 import { query, one } from "../db";
 import { badRequest, notFound } from "../http";
 import { compared, trend, metricDefs, metricValue } from "../metricQuery";
-import { DateRange, isIsoDate, addDays, eachDay, comparisonPeriod, ComparisonKind, todayIn, OPERATIONS_TZ, formatRange, dueReportWeek } from "../../shared/dates";
+import { DateRange, isIsoDate, addDays, eachDay, dayCount, comparisonPeriod, ComparisonKind, todayIn, OPERATIONS_TZ, formatRange, dueReportWeek } from "../../shared/dates";
 import { Fig, fig, missing, notApplicable, sumFigs, ratio, purchaseCpa, change } from "../../shared/metrics";
 import { rankingScopeLabel, totalWithBreakdown, trackedChannels } from "../../shared/scope";
 import { periodWithin } from "../../shared/coverage";
@@ -266,7 +266,41 @@ export async function workSummary(b: string | null, today: string) {
   };
 }
 
-export async function productsAndVendors(b: string, range: DateRange, compare: ComparisonKind | null, filters: { channel?: string; vendor?: string; category?: string } = {}) {
+// When no product report matches the selected dates exactly (product reports are saved
+// monthly or month-to-date, so a Saturday–Friday week usually has none), pick the saved
+// period that best stands in for it: the shortest one covering the whole range, otherwise
+// the one overlapping it most (ties: shorter, then later). Null when nothing overlaps.
+export function nearestPeriod(range: DateRange, periods: DateRange[]): DateRange | null {
+  const days = (r: DateRange) => dayCount(r);
+  const overlap = (r: DateRange) => {
+    const s = r.start > range.start ? r.start : range.start, e = r.end < range.end ? r.end : range.end;
+    return s <= e ? dayCount({ start: s, end: e }) : 0;
+  };
+  const covers = (r: DateRange) => r.start <= range.start && r.end >= range.end;
+  const cand = periods.filter((r) => overlap(r) > 0);
+  if (!cand.length) return null;
+  cand.sort((a, b) => Number(covers(b)) - Number(covers(a))
+    || (covers(a) ? 0 : overlap(b) - overlap(a))
+    || days(a) - days(b) || (a.end < b.end ? 1 : a.end > b.end ? -1 : 0));
+  return { start: cand[0].start, end: cand[0].end };
+}
+
+export async function productsAndVendors(b: string, requested: DateRange, compare: ComparisonKind | null, filters: { channel?: string; vendor?: string; category?: string } = {}, opts: { nearest?: boolean } = {}) {
+  let range = requested;
+  let nearest: { requested: DateRange; note: string } | null = null;
+  if (opts.nearest !== false) {
+    const exact = await one<any>(`select 1 from product_observations where status = 'active' and business_id = $1 and period_start = $2 and period_end = $3 limit 1`, [b, requested.start, requested.end]);
+    if (!exact) {
+      const periods = await query<DateRange>(
+        `select distinct to_char(period_start,'YYYY-MM-DD') as start, to_char(period_end,'YYYY-MM-DD') as end from product_observations
+          where status = 'active' and business_id = $1 and period_start <= $3 and period_end >= $2`, [b, requested.start, requested.end]);
+      const pick = nearestPeriod(requested, periods);
+      if (pick) {
+        range = pick;
+        nearest = { requested, note: `No product report is saved for ${formatRange(requested)}. Showing the nearest saved report, ${formatRange(pick)}. These figures are for those dates and are not part of the selected period's totals.` };
+      }
+    }
+  }
   const cmp = compare ? comparisonPeriod(range, compare) : null;
   const load = async (r: DateRange) => query<any>(
     `select o.product_id, p.title, p.category, p.genus, p.url, v.id as vendor_id, v.name as vendor, o.channel_scope,
@@ -337,7 +371,7 @@ export async function productsAndVendors(b: string, range: DateRange, compare: C
   const moved = products.filter((p) => p.change.absolute !== null && !p.isNew);
   const channels = [...new Set(cur.map((r) => r.channel_scope))];
   return {
-    period: range, comparison: cmp, scopeLabel: rankingScopeLabel(channels), channels,
+    period: range, requested, exact: !nearest, nearestNote: nearest?.note ?? null, comparison: cmp, scopeLabel: rankingScopeLabel(channels), channels,
     revenueLeaders: byRev.slice(0, 10), profitLeaders: withGp.slice(0, 10),
     growing: moved.filter((p) => (p.change.absolute ?? 0) > 0).sort((a, b) => (b.change.absolute ?? 0) - (a.change.absolute ?? 0)).slice(0, 10),
     declining: moved.filter((p) => (p.change.absolute ?? 0) < 0).sort((a, b) => (a.change.absolute ?? 0) - (b.change.absolute ?? 0)).slice(0, 10),
