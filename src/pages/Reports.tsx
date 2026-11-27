@@ -63,7 +63,7 @@ function ReportView({ id, role }: { id: string; role: string }) {
         {c.corporate_gifts.completed.length ? <div className="table-wrap"><table><thead><tr><th>Completed</th><th>Action</th><th>Marketplaces</th><th>Owner</th><th>How</th></tr></thead>
           <tbody>{c.corporate_gifts.completed.map((x: any) => <tr key={x.id}><td>{x.completed_on}</td><td>{x.title}</td><td>{x.marketplaces.join(", ")}</td><td>{x.owner ?? "—"}</td><td>{x.source}{x.kind !== "Check-off" ? ` · ${x.kind}` : ""}</td></tr>)}</tbody></table></div>
           : <div className="state">No check-off items completed in this period.</div>}</Section>}
-      {c.products && c.products.vendors?.length > 0 && <Section title="Product and vendor details" sub={c.products.scopeLabel}><VendorTable vendors={c.products.vendors.slice(0, 10)} /></Section>}
+      {c.products && c.products.vendors?.length > 0 && <Section title="Product and vendor details" sub={c.products.scopeLabel}><VendorTable vendors={c.products.vendors.slice(0, 10)} profit={c.products.vendorProfit} /></Section>}
     </>}
     <Section title="Files" sub="Original images, PDFs, spreadsheets and report packs. Images are attached as files only; they never feed charts.">
       {d.files.length ? <ul className="list">{d.files.map((f: any) => <li key={f.id}><a href={`/api/attachments/${f.id}`} target="_blank" rel="noreferrer">{f.filename}</a> <span className="sub">{f.content_type} · {Math.round(f.size_bytes / 1024)} KB · {f.uploaded_by}</span></li>)}</ul> : <div className="sub">No files.</div>}

@@ -196,18 +196,27 @@ export function ProductsBlock({ p, onVendor }: { p: any; onVendor?: (id: string)
         <div className="card flat"><h3>Declining</h3><PT rows={p.declining} value={(r) => `-${money(Math.abs(r.change.absolute))}${r.dropped ? " (no sales now)" : ""}`} /></div>
       </div>
       <h3 style={{ margin: "14px 0 6px" }}>Vendor performance</h3>
-      <VendorTable vendors={p.vendors.slice(0, 8)} onVendor={onVendor} />
+      <VendorTable vendors={p.vendors.slice(0, 8)} onVendor={onVendor} profit={p.vendorProfit} />
     </div>
   );
 }
 
-export function VendorTable({ vendors, onVendor }: { vendors: any[]; onVendor?: (id: string) => void }) {
+export function VendorTable({ vendors, onVendor, profit }: { vendors: any[]; onVendor?: (id: string) => void; profit?: { covered: boolean; note: string; datesNote?: string | null; scopeNote?: string | null } }) {
   return (
-    <div className="table-wrap"><table>
+    <div className="table-wrap">
+      {profit && !profit.covered && profit.note && <div className="sub" style={{ margin: "0 0 6px" }}>Gross profit and margin: {profit.note}</div>}
+      {profit?.datesNote && <div className="sub" style={{ margin: "0 0 6px" }}>{profit.datesNote}</div>}
+      {profit?.scopeNote && <div className="sub" style={{ margin: "0 0 6px" }}>{profit.scopeNote}</div>}
+      <table>
       <thead><tr><th>Vendor</th><th className="n">Revenue</th><th className="n">Orders</th><th className="n">Units</th><th className="n">Gross profit</th><th className="n">Margin</th><th className="n">Abs change</th><th className="n">% change</th></tr></thead>
       <tbody>{vendors.map((v) => (
         <tr key={v.id ?? v.name} className={onVendor && v.id ? "clickable" : ""} onClick={() => v.id && onVendor?.(v.id)}>
-          <td><b>{v.name}</b>{v.missingCostProducts > 0 && <div className="sub">{v.missingCostProducts} product(s) with missing or partial cost</div>}{v.droppedProducts > 0 && <div className="sub">{v.droppedProducts} product(s) with no sales this period</div>}</td>
+          <td><b>{v.name}</b>
+            {v.profitSource === "gross_profit"
+              ? <div className="sub">Profit: Gross Profit app, product GP before shipping{v.grossProfit?.state === "incomplete" && v.grossProfit.note ? ` · ${v.grossProfit.note}` : ""}</div>
+              : profit?.covered && v.profitNote ? <div className="sub">{v.profitNote}</div>
+              : v.missingCostProducts > 0 && <div className="sub">{v.missingCostProducts} product(s) with missing or partial cost</div>}
+            {v.droppedProducts > 0 && <div className="sub">{v.droppedProducts} product(s) with no sales this period</div>}</td>
           <td className="n">{fmt(v.revenue, "currency")}</td><td className="n">{fmt(v.orders, "count")}</td><td className="n">{fmt(v.units, "count")}</td>
           <td className="n">{fmt(v.grossProfit, "currency")}</td><td className="n">{fmt(v.margin, "percent")}</td>
           <td className={`n ${v.change.sentiment}`}>{v.change.absolute === null ? "No comparison" : `${v.change.absolute >= 0 ? "+" : "-"}${money(Math.abs(v.change.absolute))}`}</td>
