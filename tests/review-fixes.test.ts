@@ -130,8 +130,9 @@ describe("vendor and product results do not mislead", () => {
     expect(d.profitLeaders.map((x: any) => x.title)).toEqual(["Steady A"]);
     expect(d.costCoverage).toMatchObject({ partialCost: 1, missingCost: 0 });
     const v1 = d.vendors.find((v: any) => v.name === "Vendor One (demo)");
-    expect(v1.grossProfit.state).toBe("incomplete");
-    expect(v1.margin).toMatchObject({ state: "incomplete", note: "Covers products with known costs only" });
+    // Vendor columns come only from Gross Profit (none published here): Missing, never the products' partial costs.
+    expect(v1.grossProfit).toMatchObject({ state: "missing", value: null });
+    expect(v1.margin).toMatchObject({ state: "missing", value: null });
     expect(v1.missingCostProducts).toBe(1);
   });
 
@@ -145,7 +146,7 @@ describe("vendor and product results do not mislead", () => {
     expect(v2.revenue.value).toBe(0);
     expect(v2.change).toMatchObject({ absolute: -60, percent: -100 });
     expect(v2.droppedProducts).toBe(1);
-    expect(v2.margin.state).toBe("not_applicable");
+    expect(v2.margin).toMatchObject({ state: "missing", value: null });   // no Gross Profit days for these dates
   });
 
   it("without comparison data, nothing is reported as dropped", async () => {

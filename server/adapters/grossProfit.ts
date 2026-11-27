@@ -27,7 +27,12 @@ const weekSchema = z.object({
   computed_at: z.string().nullable(), published_at: z.string().nullable(),
   totals: z.object({ gross_profit: amount, gross_profit_revenue_basis: amount, product_cost: amount, shipping_cost: amount }).passthrough(),
   // Optional: the same week by order date (the GP app's own monthly view adds orders up the same way).
-  days: z.array(z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), gross_profit: amount, gross_profit_revenue_basis: amount, product_cost: amount, shipping_cost: amount }).passthrough()).max(7).optional(),
+  days: z.array(z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), gross_profit: amount, gross_profit_revenue_basis: amount, product_cost: amount, shipping_cost: amount,
+    // Optional: product figures per store/vendor for that date (product GP before shipping; missing costs counted apart).
+    vendors: z.array(z.object({ vendor: z.string().min(1).max(120), units: z.number().finite(), known_cost_revenue: z.number().finite(),
+      known_product_cost: z.number().finite(), known_cost_gp: z.number().finite(), missing_cost_revenue: z.number().finite(),
+      missing_cost_lines: z.number().int().min(0) }).passthrough()).max(500).optional(),
+  }).passthrough()).max(7).optional(),
 });
 const pageSchema = z.object({ ok: z.literal(true), schema_version: z.literal(1), weeks: z.array(z.unknown()), next_cursor: z.string().nullable() });
 type Week = z.infer<typeof weekSchema>;
@@ -57,14 +62,47 @@ export function usableDays(w: Week) {
     .map((d) => ({ ...d, ...Object.fromEntries(DAY_METRICS.filter((k) => w.totals[k] === null).map((k) => [k, null])) }) as typeof d);
 }
 
+/** How a vendor name is matched between Gross Profit and the product reports: case, spacing, punctuation and a
+ * trailing "(…)" are ignored ("Fern Hollow Shop" = "FernHollow shop", "North Nursery (12345)" = "North Nursery"). */
+export const vendorSlug = (name: string) => name.toLowerCase().replace(/\([^)]*\)/g, " ").replace(/[^a-z0-9]+/g, "").slice(0, 60);
+export const GP_VENDOR_SCOPE = "gp_vendor:";
+export const GP_VENDORS_COVERAGE = "gp_vendors";
+export const VENDOR_METRICS = ["vendor_product_gp", "vendor_product_gp_revenue_basis", "vendor_missing_cost_revenue", "vendor_missing_cost_lines"] as const;
+
+/**
+ * A usable day's product figures per vendor, as observations scoped gp_vendor:<slug> (label = the vendor name).
+ * Names that match the same slug are added together. Product GP is before shipping and covers known-cost lines
+ * only; the revenue whose cost is missing is sent alongside so the dashboard can label the figure incomplete.
+ */
+export function vendorDayObservations(d: { date: string; vendors?: { vendor: string; known_cost_revenue: number; known_cost_gp: number; missing_cost_revenue: number; missing_cost_lines: number }[] }) {
+  const by = new Map<string, { label: string; gp: number; basis: number; missing: number; lines: number }>();
+  for (const v of d.vendors ?? []) {
+    const slug = vendorSlug(v.vendor);
+    if (!slug) continue;
+    const b = by.get(slug) ?? by.set(slug, { label: v.vendor.trim(), gp: 0, basis: 0, missing: 0, lines: 0 }).get(slug)!;
+    b.gp += v.known_cost_gp; b.basis += v.known_cost_revenue; b.missing += v.missing_cost_revenue; b.lines += v.missing_cost_lines;
+  }
+  const c2 = (x: number) => Math.round(x * 100) / 100;
+  // One coverage marker per day: the day has a vendor breakdown (a vendor absent from it sold nothing that day).
+  const marker = { metric: "vendor_breakdown_vendors", scope: GP_VENDORS_COVERAGE, scope_label: "Gross Profit vendor breakdown", value: by.size,
+    period_start: d.date, period_end: d.date, granularity: "day" as const };
+  return [marker, ...[...by.entries()].flatMap(([slug, b]) => ([
+    ["vendor_product_gp", b.gp], ["vendor_product_gp_revenue_basis", b.basis], ["vendor_missing_cost_revenue", b.missing], ["vendor_missing_cost_lines", b.lines],
+  ] as const).map(([metric, v]) => ({ metric, scope: `${GP_VENDOR_SCOPE}${slug}`, scope_label: b.label.slice(0, 120), value: c2(v),
+    period_start: d.date, period_end: d.date, granularity: "day" as const })))];
+}
+
 /** One published week → one submission (week totals, plus the same figures by day when the app sends them). */
 export function weekToSubmission(w: Week) {
   const days = usableDays(w);
-  const dayObs = days.flatMap((d) => DAY_METRICS
-    .map((k) => ({ ...obs(k, d[k] ?? null), period_start: d.date, period_end: d.date, granularity: "day" as const })));
+  // Vendor figures only when every usable day carries them (a week is all or nothing, so a date range is never half covered).
+  const withVendors = days.length > 0 && days.every((d) => Array.isArray((d as any).vendors));
+  const dayObs = days.flatMap((d) => [...DAY_METRICS
+    .map((k) => ({ ...obs(k, d[k] ?? null), period_start: d.date, period_end: d.date, granularity: "day" as const })),
+    ...(withVendors ? vendorDayObservations(d as any) : [])]);
   return {
     schema_version: 1,
-    submission_id: `gp:${w.period.week_start}:r${w.revision}${days.length ? "d" : ""}`,
+    submission_id: `gp:${w.period.week_start}:r${w.revision}${days.length ? "d" : ""}${withVendors ? "v" : ""}`,
     source: "gross_profit", business: "sb" as const,
     period: { start: w.period.start, end: w.period.end, granularity: w.period.granularity, timezone: w.period.timezone },
     collected_at: new Date(w.published_at ?? w.computed_at ?? Date.now()).toISOString(),

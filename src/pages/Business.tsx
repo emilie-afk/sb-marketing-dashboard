@@ -107,7 +107,7 @@ function Vendors({ period, setPeriod, vendorId }: { period: Period; setPeriod: (
         <span className="sub">{d.scopeLabel}. {d.periodLabel}{d.comparison ? `, compared with ${range(d.comparison)}` : ""}.</span>
       </div>
       <Section title="Vendor comparison" sub="Measured results. Missing product costs show as missing, never as zero.">
-        <VendorTable vendors={d.vendors} onVendor={(id) => (location.hash = `#/sb/vendors/${id}`)} />
+        <VendorTable vendors={d.vendors} onVendor={(id) => (location.hash = `#/sb/vendors/${id}`)} profit={d.vendorProfit} />
       </Section>
       <Section title="What to promote" sub="Suggestions, kept separate from the measured results above.">
         <div className="card flat"><ul className="list">
@@ -141,7 +141,7 @@ function Profitability({ period, setPeriod }: { period: Period; setPeriod: (p: P
         <div className="grid g4">{d.metrics.map((m: any) => <MetricTile key={`${m.key}:${m.scope ?? ""}`} m={m} />)}</div></Section>
       <Section title="Trends"><TrendPanel trends={d.trends} initial={d.trends.map((t: any) => `${t.business}:${t.key}`)} /></Section>
       <Section title="Cost coverage"><div className="card flat">{d.products.costCoverage.products ? `${d.products.costCoverage.products - d.products.costCoverage.missingCost} of ${d.products.costCoverage.products} products have a known cost. ${d.products.costCoverage.missingCost} are missing cost and are excluded from gross profit and margin (not counted as zero).` : "No product-level results for this period."}</div></Section>
-      <Section title="By vendor"><VendorTable vendors={d.products.vendors} /></Section>
+      <Section title="By vendor"><VendorTable vendors={d.products.vendors} profit={d.products.vendorProfit} /></Section>
     </>)}</Async>;
 }
 

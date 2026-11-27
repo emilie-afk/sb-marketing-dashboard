@@ -9,6 +9,7 @@ import { DateRange, isIsoDate, addDays, eachDay, dayCount, comparisonPeriod, Com
 import { Fig, fig, missing, notApplicable, sumFigs, ratio, purchaseCpa, change } from "../../shared/metrics";
 import { rankingScopeLabel, totalWithBreakdown, trackedChannels } from "../../shared/scope";
 import { periodWithin } from "../../shared/coverage";
+import { vendorProfitFor, vendorProfitWithheld } from "../vendorProfit";
 
 const BUSINESSES = ["sb", "p2s", "perksradar"] as const;
 const HEADLINE: Record<string, string[]> = {
@@ -340,25 +341,34 @@ export async function productsAndVendors(b: string, requested: DateRange, compar
     vendors.get(k).rows.push(p);
   }
   for (const p of prior) vendors.get(p.vendor_id ?? "none")?.prior.push(p);
-  // Margin only over products whose profit is known (complete or partial). Any cost gap keeps it labelled incomplete.
-  const vendorMargin = (rows: any[], gp: Fig): Fig => {
-    if (gp.state === "not_applicable") return notApplicable("No sales this period");
-    const known = rows.filter((r) => r.grossProfit.value !== null);
-    if (!known.length) return missing("Product costs are missing");
-    const m = ratio(sumFigs(known.map((r) => r.grossProfit)), sumFigs(known.map((r) => r.revenueFig)));
-    const gaps = rows.some((r) => r.grossProfit.state === "missing" || r.grossProfit.state === "incomplete");
-    return gaps && m.value !== null ? { state: "incomplete", value: m.value, note: "Covers products with known costs only" } : m;
-  };
   const costGap = (r: any) => r.grossProfit.state === "missing" || r.grossProfit.state === "incomplete";
+  // Vendor profit comes from the Gross Profit app's published days (server/vendorProfit.ts); the product reports carry
+  // no costs. Products keep their own (missing) cost state.
+  //  - Dates: always the SELECTED dates (`requested`), never the nearest sales report's. When the sales figures come
+  //    from a nearest saved report, both date ranges are stated.
+  //  - Filters: Gross Profit has vendor figures only (not by channel or category), so under a channel or category
+  //    filter profit and margin are withheld with the reason rather than shown as the vendor's whole total.
+  const unsupported = [filters.channel ? "channel" : null, filters.category ? "category" : null].filter(Boolean) as string[];
+  const vp = unsupported.length
+    ? vendorProfitWithheld(`Gross Profit doesn't split vendor profit by ${unsupported.join(" or ")}, so gross profit and margin are not shown while that filter is on. Clear it to see vendor profit for ${formatRange(requested)}.`)
+    : await vendorProfitFor(b, requested);
+  const profitDatesNote = nearest && !unsupported.length
+    ? `Gross profit and margin are for the selected dates, ${formatRange(requested)}. Revenue, orders and units are from the nearest saved sales report, ${formatRange(range)}.`
+    : null;
   const vendorRows = [...vendors.values()].map((v) => {
     const revenue = sumFigs(v.rows.map((r: any) => r.revenueFig));
-    const gp = sumFigs(v.rows.map((r: any) => r.grossProfit));
     const priorRev = priorHasData ? (v.prior.length ? sumFigs(v.prior.map((r: any) => (r.revenue === null ? missing() : fig(r.revenue)))) : fig(0)) : missing("No data for the comparison period");
     return {
       id: v.id, name: v.name, revenue,
       orders: sumFigs(v.rows.map((r: any) => (r.orders === null ? missing() : fig(r.orders)))),
       units: sumFigs(v.rows.map((r: any) => (r.units === null ? missing() : fig(r.units)))),
-      grossProfit: gp, margin: vendorMargin(v.rows, gp),
+      ...(() => {
+        // Vendor gross profit and margin come ONLY from Gross Profit for the selected dates. When it is withheld (a
+        // filter it can't apply) or a selected day has no published vendor figures, they are Missing with the reason;
+        // the sales reports' product costs are never used here (other dates or scope, and a different revenue basis).
+        const p = vp.profitFor(v.name);
+        return { grossProfit: p.grossProfit, margin: p.margin, profitSource: p.grossProfit.value !== null ? "gross_profit" : null, profitNote: p.note };
+      })(),
       missingCostProducts: v.rows.filter(costGap).length,
       droppedProducts: v.rows.filter((r: any) => r.dropped).length,
       change: change(revenue, priorRev, "currency", "up"),
@@ -371,6 +381,10 @@ export async function productsAndVendors(b: string, requested: DateRange, compar
   const moved = products.filter((p) => p.change.absolute !== null && !p.isNew);
   const channels = [...new Set(cur.map((r) => r.channel_scope))];
   return {
+    vendorProfit: { covered: vp.covered, gaps: vp.gaps, note: vp.note, range: requested, salesRange: range, datesNote: profitDatesNote, withheld: unsupported.length > 0,
+      // Gross Profit covers the Shopify store; say so when the table's revenue also includes other channels' reports.
+      scopeNote: vp.covered && channels.some((c) => c !== "channel:shopify_report")
+        ? `Gross profit covers Shopify store sales only; revenue here also includes ${channels.filter((c) => c !== "channel:shopify_report").map((c) => c.replace(/^channel:/, "")).join(", ")}.` : null },
     period: range, requested, exact: !nearest, nearestNote: nearest?.note ?? null, comparison: cmp, scopeLabel: rankingScopeLabel(channels), channels,
     revenueLeaders: byRev.slice(0, 10), profitLeaders: withGp.slice(0, 10),
     growing: moved.filter((p) => (p.change.absolute ?? 0) > 0).sort((a, b) => (b.change.absolute ?? 0) - (a.change.absolute ?? 0)).slice(0, 10),

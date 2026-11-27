@@ -325,9 +325,13 @@ describe("products and vendors", () => {
     expect(r.body.vendors).toHaveLength(1);
     const v = r.body.vendors[0];
     expect(v.revenue.value).toBe(150);
-    expect(v.grossProfit.state).toBe("incomplete");
-    expect(v.margin).toMatchObject({ state: "incomplete", value: 0.4 });   // 40 / 100: only the product with a known cost
+    // Vendor gross profit and margin come only from Gross Profit; with no published GP days they are Missing,
+    // never built from the product rows' costs (tests/vendor-profit.test.ts covers the GP figures).
+    expect(v.grossProfit).toMatchObject({ state: "missing", value: null });
+    expect(v.margin).toMatchObject({ state: "missing", value: null });
     expect(v.missingCostProducts).toBe(1);
+    const a = r.body.products.find((x: any) => x.title === "Demo A");
+    expect(a.grossProfit).toMatchObject({ state: "value", value: 40 });   // product rows keep their own known cost
   });
 });
 
